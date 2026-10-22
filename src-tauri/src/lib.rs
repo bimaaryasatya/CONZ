@@ -44,6 +44,106 @@ mod win_input {
     }
 }
 
+#[cfg(target_os = "macos")]
+mod mac_input {
+    use std::ffi::c_void;
+
+    type CGEventRef = *mut c_void;
+    type CGEventSourceStateID = i32;
+    type CGMouseButton = u32;
+    type CGEventFlags = u64;
+
+    #[repr(C)]
+    #[derive(Default, Copy, Clone)]
+    pub struct CGPoint {
+        pub x: f64,
+        pub y: f64,
+    }
+
+    const COMBINED_SESSION_STATE: CGEventSourceStateID = 0;
+    const MOUSE_BUTTON_LEFT: CGMouseButton = 0;
+    const FLAG_MASK_SHIFT: CGEventFlags = 0x00020000;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventCreate(source: *const c_void) -> CGEventRef;
+        fn CGEventGetLocation(event: CGEventRef) -> CGPoint;
+        fn CGEventSourceButtonState(state_id: CGEventSourceStateID, button: CGMouseButton) -> bool;
+        fn CGEventSourceFlagsState(state_id: CGEventSourceStateID) -> CGEventFlags;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(cf: *const c_void);
+    }
+
+    pub fn is_mouse_down() -> bool {
+        unsafe { CGEventSourceButtonState(COMBINED_SESSION_STATE, MOUSE_BUTTON_LEFT) }
+    }
+
+    pub fn is_shift_down() -> bool {
+        unsafe { (CGEventSourceFlagsState(COMBINED_SESSION_STATE) & FLAG_MASK_SHIFT) != 0 }
+    }
+
+    pub fn get_mouse_pos() -> Option<(i32, i32)> {
+        unsafe {
+            let event = CGEventCreate(std::ptr::null());
+            if event.is_null() {
+                None
+            } else {
+                let loc = CGEventGetLocation(event);
+                CFRelease(event as *const c_void);
+                Some((loc.x.round() as i32, loc.y.round() as i32))
+            }
+        }
+    }
+}
+
+fn get_current_mouse_pos() -> Option<(i32, i32)> {
+    #[cfg(target_os = "windows")]
+    {
+        win_input::get_mouse_pos()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        mac_input::get_mouse_pos()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+fn is_drag_shift_active() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        win_input::is_key_down(0x01) && win_input::is_key_down(0x10)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        mac_input::is_mouse_down() && mac_input::is_shift_down()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        false
+    }
+}
+
+fn set_window_position_at_cursor(window: &tauri::WebviewWindow) {
+    if let Some((x, y)) = get_current_mouse_pos() {
+        #[cfg(target_os = "windows")]
+        let _ = window.set_position(tauri::PhysicalPosition::new(x - 270, y - 270));
+
+        #[cfg(target_os = "macos")]
+        let _ = window.set_position(tauri::LogicalPosition::new((x - 270) as f64, (y - 270) as f64));
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let _ = window.center();
+    } else {
+        let _ = window.center();
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConvertResult {
     pub success: bool,
@@ -104,10 +204,15 @@ fn open_in_folder(file_path: String) -> Result<bool, String> {
         let _ = Command::new("explorer.exe").args([&arg]).spawn();
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg("-R").arg(p).spawn();
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         if let Some(parent) = p.parent() {
-            let _ = open::that(parent);
+            let _ = Command::new("xdg-open").arg(parent).spawn();
         }
     }
 
@@ -327,6 +432,117 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
                 return Err("Gagal mengonversi dokumen Word. Pastikan Microsoft Word terpasang.".to_string());
             }
         }
+
+        #[cfg(target_os = "macos")]
+        {
+            // 1. Try Microsoft Word via AppleScript if installed
+            if Path::new("/Applications/Microsoft Word.app").exists() {
+                let script = format!(
+                    r#"
+                    tell application "Microsoft Word"
+                        set isRunning to running
+                        open POSIX file "{input}"
+                        set activeDoc to active document
+                        save as activeDoc file name "{output}" file format format PDF
+                        close activeDoc saving no
+                        if not isRunning then
+                            quit
+                        end if
+                    end tell
+                    "#,
+                    input = p.to_string_lossy().replace("\"", "\\\""),
+                    output = output_path.to_string_lossy().replace("\"", "\\\"")
+                );
+
+                if let Ok(res) = Command::new("osascript").args(["-e", &script]).output() {
+                    if res.status.success() && output_path.exists() {
+                        let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                        return Ok(ConvertResult {
+                            success: true,
+                            input_path: input_path.to_string(),
+                            output_path: output_path_str,
+                            output_filename,
+                            message: "Berhasil dikonversi ke PDF via Microsoft Word".to_string(),
+                            size_bytes: size,
+                        });
+                    }
+                }
+            }
+
+            // 2. Fallback to LibreOffice if installed
+            let soffice_paths = [
+                "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+                "/usr/local/bin/soffice",
+                "/opt/homebrew/bin/soffice",
+            ];
+            for soffice in soffice_paths {
+                if Path::new(soffice).exists() {
+                    let mut lo_cmd = Command::new(soffice);
+                    lo_cmd.args([
+                        "--headless",
+                        "--convert-to",
+                        "pdf",
+                        "--outdir",
+                        parent_dir.to_string_lossy().as_ref(),
+                        p.to_string_lossy().as_ref(),
+                    ]);
+
+                    if let Ok(lo_res) = lo_cmd.output() {
+                        if lo_res.status.success() && output_path.exists() {
+                            let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                            return Ok(ConvertResult {
+                                success: true,
+                                input_path: input_path.to_string(),
+                                output_path: output_path_str,
+                                output_filename,
+                                message: "Berhasil dikonversi via LibreOffice ke PDF".to_string(),
+                                size_bytes: size,
+                            });
+                        }
+                    }
+                }
+            }
+
+            return Err("Gagal mengonversi dokumen Word. Pastikan Microsoft Word atau LibreOffice terpasang.".to_string());
+        }
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            let soffice_paths = [
+                "/usr/bin/soffice",
+                "/usr/bin/libreoffice",
+                "/usr/local/bin/soffice",
+            ];
+            for soffice in soffice_paths {
+                if Path::new(soffice).exists() {
+                    let mut lo_cmd = Command::new(soffice);
+                    lo_cmd.args([
+                        "--headless",
+                        "--convert-to",
+                        "pdf",
+                        "--outdir",
+                        parent_dir.to_string_lossy().as_ref(),
+                        p.to_string_lossy().as_ref(),
+                    ]);
+
+                    if let Ok(lo_res) = lo_cmd.output() {
+                        if lo_res.status.success() && output_path.exists() {
+                            let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                            return Ok(ConvertResult {
+                                success: true,
+                                input_path: input_path.to_string(),
+                                output_path: output_path_str,
+                                output_filename,
+                                message: "Berhasil dikonversi via LibreOffice ke PDF".to_string(),
+                                size_bytes: size,
+                            });
+                        }
+                    }
+                }
+            }
+
+            return Err("Gagal mengonversi dokumen Word. Pastikan LibreOffice terpasang.".to_string());
+        }
     }
 
     Err(format!(
@@ -372,6 +588,15 @@ pub fn is_autostart_enabled() -> bool {
             return out.status.success();
         }
     }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let plist_path = Path::new(&home).join("Library/LaunchAgents/com.lenovo.conz.plist");
+            return plist_path.exists();
+        }
+    }
+
     false
 }
 
@@ -416,8 +641,51 @@ pub fn set_autostart(enable: bool) -> Result<(), String> {
             Ok(())
         }
     }
-    #[cfg(not(target_os = "windows"))]
-    Ok(())
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+        let launch_agents_dir = Path::new(&home).join("Library/LaunchAgents");
+        let plist_path = launch_agents_dir.join("com.lenovo.conz.plist");
+
+        if enable {
+            let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let exe_path = current_exe.to_string_lossy();
+
+            let plist_content = format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lenovo.conz</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>"#,
+                exe_path
+            );
+
+            let _ = fs::create_dir_all(&launch_agents_dir);
+            fs::write(&plist_path, plist_content).map_err(|e| e.to_string())?;
+            Ok(())
+        } else {
+            if plist_path.exists() {
+                let _ = fs::remove_file(&plist_path);
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = enable;
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -438,7 +706,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
-            // Otomatis aktifkan agar selalu jalan saat Windows booting
+            #[cfg(target_os = "macos")]
+            {
+                // Set accessory activation policy to hide app from macOS Dock
+                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
+
+            // Otomatis aktifkan agar selalu jalan saat booting
             let _ = set_autostart(true);
 
             // Build Tray Icon with Menu
@@ -459,7 +733,7 @@ pub fn run() {
                         let msg = if new_state {
                             "CONZ diaktifkan: Akan otomatis berjalan saat laptop dinyalakan."
                         } else {
-                            "CONZ dinonaktifkan dari startup Windows."
+                            "CONZ dinonaktifkan dari startup."
                         };
                         let _ = app
                             .notification()
@@ -470,10 +744,7 @@ pub fn run() {
                     }
                     "test" => {
                         if let Some(window) = app.get_webview_window("main") {
-                            #[cfg(target_os = "windows")]
-                            if let Some((x, y)) = win_input::get_mouse_pos() {
-                                let _ = window.set_position(tauri::PhysicalPosition::new(x - 270, y - 270));
-                            }
+                            set_window_position_at_cursor(&window);
                             let _ = window.show();
                             let _ = window.set_focus();
                             let _ = window.emit("test-radial", ());
@@ -493,10 +764,7 @@ pub fn run() {
                     {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
-                            #[cfg(target_os = "windows")]
-                            if let Some((x, y)) = win_input::get_mouse_pos() {
-                                let _ = window.set_position(tauri::PhysicalPosition::new(x - 270, y - 270));
-                            }
+                            set_window_position_at_cursor(&window);
                             let _ = window.show();
                             let _ = window.set_focus();
                             let _ = window.emit("test-radial", ());
@@ -514,44 +782,39 @@ pub fn run() {
                 loop {
                     std::thread::sleep(std::time::Duration::from_millis(30));
 
-                    #[cfg(target_os = "windows")]
-                    {
-                        let lbutton = win_input::is_key_down(0x01); // VK_LBUTTON
-                        let shift = win_input::is_key_down(0x10);   // VK_SHIFT
-
-                        if lbutton && shift {
-                            if let Some((x, y)) = win_input::get_mouse_pos() {
-                                if start_pos.is_none() {
-                                    start_pos = Some((x, y));
-                                }
-
-                                let moved = if let Some((sx, sy)) = start_pos {
-                                    let dx = (x - sx).abs();
-                                    let dy = (y - sy).abs();
-                                    dx > 4 || dy > 4
-                                } else {
-                                    false
-                                };
-
-                                if moved && !was_active {
-                                    was_active = true;
-                                    if let Some(window) = app_handle.get_webview_window("main") {
-                                        let _ = window.set_position(tauri::PhysicalPosition::new(x - 270, y - 270));
-                                        let _ = window.show();
-                                        let _ = window.set_focus();
-                                        let _ = window.emit("radial-show", ());
-                                    }
-                                }
+                    let is_active = is_drag_shift_active();
+                    if is_active {
+                        if let Some((x, y)) = get_current_mouse_pos() {
+                            if start_pos.is_none() {
+                                start_pos = Some((x, y));
                             }
-                        } else {
-                            if was_active {
-                                was_active = false;
-                                start_pos = None;
-                                std::thread::sleep(std::time::Duration::from_millis(150));
-                                let _ = app_handle.emit("radial-check-hide", ());
+
+                            let moved = if let Some((sx, sy)) = start_pos {
+                                let dx = (x - sx).abs();
+                                let dy = (y - sy).abs();
+                                dx > 4 || dy > 4
                             } else {
-                            start_pos = None;
+                                false
+                            };
+
+                            if moved && !was_active {
+                                was_active = true;
+                                if let Some(window) = app_handle.get_webview_window("main") {
+                                    set_window_position_at_cursor(&window);
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                    let _ = window.emit("radial-show", ());
+                                }
                             }
+                        }
+                    } else {
+                        if was_active {
+                            was_active = false;
+                            start_pos = None;
+                            std::thread::sleep(std::time::Duration::from_millis(150));
+                            let _ = app_handle.emit("radial-check-hide", ());
+                        } else {
+                            start_pos = None;
                         }
                     }
                 }
