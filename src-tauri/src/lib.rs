@@ -361,23 +361,113 @@ async fn convert_file(
     Ok(result)
 }
 
+pub fn is_autostart_enabled() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let output = Command::new("reg")
+            .args(&["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "CONZ"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        if let Ok(out) = output {
+            return out.status.success();
+        }
+    }
+    false
+}
+
+pub fn set_autostart(enable: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        if enable {
+            let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let exe_path = current_exe.to_string_lossy().to_string();
+            let value = format!("\"{}\"", exe_path);
+            let status = Command::new("reg")
+                .args(&[
+                    "add",
+                    r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                    "/v",
+                    "CONZ",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    &value,
+                    "/f",
+                ])
+                .creation_flags(CREATE_NO_WINDOW)
+                .status()
+                .map_err(|e| e.to_string())?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err("Gagal mendaftarkan registry startup".to_string())
+            }
+        } else {
+            let _ = Command::new("reg")
+                .args(&[
+                    "delete",
+                    r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                    "/v",
+                    "CONZ",
+                    "/f",
+                ])
+                .creation_flags(CREATE_NO_WINDOW)
+                .status();
+            Ok(())
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    Ok(())
+}
+
+#[tauri::command]
+fn get_autostart_status() -> bool {
+    is_autostart_enabled()
+}
+
+#[tauri::command]
+fn toggle_autostart_status() -> bool {
+    let next = !is_autostart_enabled();
+    let _ = set_autostart(next);
+    next
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            // Otomatis aktifkan agar selalu jalan saat Windows booting
+            let _ = set_autostart(true);
+
             // Build Tray Icon with Menu
             let status_item = MenuItem::with_id(app, "status", "CONZ: Drag + Tahan Shift", false, None::<&str>)?;
+            let autostart_item = MenuItem::with_id(app, "toggle_autostart", "Jalankan Otomatis saat Startup (Toggle)", true, None::<&str>)?;
             let test_item = MenuItem::with_id(app, "test", "Tes Radial Menu", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Keluar", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&status_item, &test_item, &quit_item])?;
+            let menu = Menu::with_items(app, &[&status_item, &autostart_item, &test_item, &quit_item])?;
 
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
                 .tooltip("CONZ — File Converter (Drag + Shift)")
                 .on_menu_event(|app, event| match event.id.as_ref() {
+                    "toggle_autostart" => {
+                        let new_state = !is_autostart_enabled();
+                        let _ = set_autostart(new_state);
+                        let msg = if new_state {
+                            "CONZ diaktifkan: Akan otomatis berjalan saat laptop dinyalakan."
+                        } else {
+                            "CONZ dinonaktifkan dari startup Windows."
+                        };
+                        let _ = app
+                            .notification()
+                            .builder()
+                            .title("CONZ Startup Settings")
+                            .body(msg)
+                            .show();
+                    }
                     "test" => {
                         if let Some(window) = app.get_webview_window("main") {
                             #[cfg(target_os = "windows")]
@@ -460,7 +550,7 @@ pub fn run() {
                                 std::thread::sleep(std::time::Duration::from_millis(150));
                                 let _ = app_handle.emit("radial-check-hide", ());
                             } else {
-                                start_pos = None;
+                            start_pos = None;
                             }
                         }
                     }
@@ -480,7 +570,9 @@ pub fn run() {
             get_file_metadata,
             convert_file,
             open_in_folder,
-            hide_radial_window
+            hide_radial_window,
+            get_autostart_status,
+            toggle_autostart_status
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
