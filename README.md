@@ -2,7 +2,7 @@
 
 > Instant, gesture-driven radial file converter for Windows.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-GNU/GPLv3-blue.svg?style=flat-square)](LICENSE)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6.svg?style=flat-square&logo=windows&logoColor=white)](#)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-24C8DB.svg?style=flat-square&logo=tauri&logoColor=white)](https://tauri.app)
 [![Rust](https://img.shields.io/badge/Rust-2024-DEA584.svg?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
@@ -42,12 +42,12 @@ Holding <kbd>Shift</kbd> while dragging a file summons an always-on-top, hardwar
 
 ## Supported Formats
 
-| Category | Source Formats | Target Formats | Processing Engine |
-| :--- | :--- | :--- | :--- |
-| **Documents** | `.docx`, `.doc` | `.pdf`, `.txt`, `.html`, `.odt` | COM Automation / Headless LibreOffice |
-| **Images to PDF** | `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`, `.ico` | `.pdf` | Native Rust PDF 1.4 Engine |
-| **Image Conversion** | `.png`, `.jpg`, `.webp`, `.bmp`, `.ico` | `.png`, `.jpg`, `.webp`, `.bmp`, `.ico` | Native Image Encoder (`image` crate) |
-| **Data** | `.csv` | `.json`, `.xlsx` | Rust Data Pipeline |
+| Category             | Source Formats                                   | Target Formats                          | Processing Engine                     |
+| :------------------- | :----------------------------------------------- | :-------------------------------------- | :------------------------------------ |
+| **Documents**        | `.docx`, `.doc`                                  | `.pdf`, `.txt`, `.html`, `.odt`         | COM Automation / Headless LibreOffice |
+| **Images to PDF**    | `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`, `.ico` | `.pdf`                                  | Native Rust PDF 1.4 Engine            |
+| **Image Conversion** | `.png`, `.jpg`, `.webp`, `.bmp`, `.ico`          | `.png`, `.jpg`, `.webp`, `.bmp`, `.ico` | Native Image Encoder (`image` crate)  |
+| **Data**             | `.csv`                                           | `.json`, `.xlsx`                        | Rust Data Pipeline                    |
 
 ---
 
@@ -107,6 +107,7 @@ npm run tauri build
 ```
 
 Build outputs are located in:
+
 - **Portable Executable:** `src-tauri/target/release/conz.exe` (~5.7 MB)
 - **NSIS Installer:** `src-tauri/target/release/bundle/nsis/CONZ_0.1.0_x64-setup.exe`
 
