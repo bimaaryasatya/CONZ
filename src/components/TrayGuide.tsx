@@ -12,7 +12,7 @@ export const TrayGuide: React.FC = () => {
         <h2>Berjalan Hening di Latar Belakang</h2>
         <p>
           Tutup jendela ini kapan saja — aplikasi tetap standby di System Tray
-          (pojok kanan bawah taskbar Windows). Fitur{" "}
+          (taskbar Windows / menu bar macOS). Fitur{" "}
           <strong>Drag + Shift → Radial CONZ</strong> selalu siap sedia!
         </p>
       </div>
@@ -27,7 +27,7 @@ export const TrayGuide: React.FC = () => {
           {
             num: "02",
             title: "Tahan Shift & Drag File",
-            desc: "Pilih file apa pun dari Explorer, tahan Shift, lalu tarik ke area drop zone.",
+            desc: "Pilih file apa pun dari File Explorer atau Finder, tahan Shift, lalu tarik ke area drop zone.",
           },
           {
             num: "03",

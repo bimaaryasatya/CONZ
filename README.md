@@ -1,9 +1,9 @@
 # CONZ
 
-> Instant, gesture-driven radial file converter for Windows.
+> Instant, gesture-driven radial file converter for Windows & macOS.
 
 [![License: MIT](https://img.shields.io/badge/license-GNU/GPLv3-blue.svg?style=flat-square)](LICENSE)
-[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6.svg?style=flat-square&logo=windows&logoColor=white)](#)
+[![Platform: Windows & macOS](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-0078D6.svg?style=flat-square)](#)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-24C8DB.svg?style=flat-square&logo=tauri&logoColor=white)](https://tauri.app)
 [![Rust](https://img.shields.io/badge/Rust-2024-DEA584.svg?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![React](https://img.shields.io/badge/React-19-61DAFB.svg?style=flat-square&logo=react&logoColor=black)](https://react.dev)
@@ -12,7 +12,7 @@
 
 ## Overview
 
-**CONZ** is a lightweight Windows utility engineered to streamline everyday file conversions. Designed to operate unobtrusively in the background, CONZ eliminates traditional multi-step conversion workflows by integrating directly with native OS drag-and-drop interactions.
+**CONZ** is a lightweight utility engineered to streamline everyday file conversions. Designed to operate unobtrusively in the background, CONZ eliminates traditional multi-step conversion workflows by integrating directly with native OS drag-and-drop interactions.
 
 Holding <kbd>Shift</kbd> while dragging a file summons an always-on-top, hardware-accelerated radial HUD centered on the cursor. Releasing the file over a target format sector queues the conversion asynchronously in the background, writing the output directly to the source directory.
 
@@ -20,11 +20,11 @@ Holding <kbd>Shift</kbd> while dragging a file summons an always-on-top, hardwar
 
 ## Features
 
-- **System Tray Operation**  
-  Runs quietly in the background without persistent windows or command prompt instances. Accessible on demand via system tray or global gestures.
+- **System Tray / Menu Bar Operation**  
+  Runs quietly in the background without persistent windows or command prompt instances. Accessible on demand via system tray / menu bar or global gestures.
 
 - **Gesture-Based Radial Trigger**  
-  Low-level global mouse and keyboard monitoring detects `Shift + Left-Click Drag` across Windows Explorer and the Desktop, spawning the radial HUD directly at the cursor coordinates.
+  Low-level global mouse and keyboard monitoring detects `Shift + Left-Click Drag` across Windows Explorer / macOS Finder and the Desktop, spawning the radial HUD directly at the cursor coordinates.
 
 - **Dynamic Radial HUD**  
   Hardware-accelerated interface featuring continuous angular interpolation, glassmorphic sector highlights, and keyboard shortcuts (`1`, `2`, `3`, `4`) for rapid selection.
@@ -76,8 +76,8 @@ CONZ/
 ### Prerequisites
 
 - [Node.js](https://nodejs.org/) (v18.0 or higher)
-- [Rust](https://www.rust-lang.org/tools/install) (latest stable toolchain with MSVC target)
-- Windows 10/11 with WebView2 Runtime (preinstalled on modern Windows)
+- [Rust](https://www.rust-lang.org/tools/install) (latest stable toolchain)
+- Windows 10/11 with WebView2 Runtime, or macOS 10.15+ (Catalina or higher)
 
 ### Installation
 
