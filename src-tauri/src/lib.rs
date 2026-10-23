@@ -489,6 +489,159 @@ fn convert_archive(input_path: &Path, output_path: &Path, target_ext: &str) -> R
     Ok(())
 }
 
+/// Convert PDF document to PNG/JPG/WEBP/BMP images via native OS APIs (Windows.Data.Pdf on Windows, sips on macOS)
+fn convert_pdf_to_images(
+    input_path: &Path,
+    _output_path: &Path,
+    parent_dir: &Path,
+    stem: &str,
+    target_ext: &str,
+) -> Result<(String, u64), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let base_name = format!("{}_converted", stem);
+        let script = format!(
+            r#"
+            $ErrorActionPreference = 'Stop'
+            try {{
+                Add-Type -AssemblyName System.Runtime.WindowsRuntime
+                $asTaskGeneric = [System.WindowsRuntimeSystemExtensions].GetMethods() | ? {{ 
+                    $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' 
+                }}
+                function AwaitOp($op, $t) {{
+                    $task = $asTaskGeneric.MakeGenericMethod($t).Invoke($null, @($op))
+                    $task.Wait(-1) | Out-Null
+                    return $task.Result
+                }}
+                $asTaskAction = [System.WindowsRuntimeSystemExtensions].GetMethods() | ? {{ 
+                    $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncAction' 
+                }}
+                function AwaitAct($op) {{
+                    $task = $asTaskAction.Invoke($null, @($op))
+                    $task.Wait(-1) | Out-Null
+                }}
+
+                [Windows.Storage.StorageFile, Windows.Storage, ContentType=WindowsRuntime] | Out-Null
+                [Windows.Data.Pdf.PdfDocument, Windows.Data.Pdf, ContentType=WindowsRuntime] | Out-Null
+
+                $fullInPath = (Resolve-Path '{input}').Path
+                $fileOp = [Windows.Storage.StorageFile]::GetFileFromPathAsync($fullInPath)
+                $storageFile = AwaitOp $fileOp ([Windows.Storage.StorageFile])
+
+                $pdfOp = [Windows.Data.Pdf.PdfDocument]::LoadFromFileAsync($storageFile)
+                $pdfDoc = AwaitOp $pdfOp ([Windows.Data.Pdf.PdfDocument])
+
+                $pageCount = $pdfDoc.PageCount
+                if ($pageCount -eq 0) {{
+                    exit 1
+                }}
+
+                for ($i = 0; $i -lt $pageCount; $i++) {{
+                    $page = $pdfDoc.GetPage($i)
+                    $fileName = if ($i -eq 0) {{ "{base_name}.png" }} else {{ "{base_name}_page_$($i + 1).png" }}
+                    $outPath = Join-Path '{out_dir}' $fileName
+                    if (Test-Path $outPath) {{ Remove-Item $outPath -Force }}
+
+                    $outFileOp = [Windows.Storage.StorageFile]::GetFileFromPathAsync((New-Item -ItemType File -Path $outPath -Force).FullName)
+                    $outStorageFile = AwaitOp $outFileOp ([Windows.Storage.StorageFile])
+
+                    $streamOp = $outStorageFile.OpenAsync([Windows.Storage.FileAccessMode]::ReadWrite)
+                    $stream = AwaitOp $streamOp ([Windows.Storage.Streams.IRandomAccessStream])
+
+                    $renderOp = $page.RenderToStreamAsync($stream)
+                    AwaitAct $renderOp
+
+                    $stream.Dispose()
+                    $page.Dispose()
+                }}
+                exit 0
+            }} catch {{
+                Write-Error $_.Exception.Message
+                exit 1
+            }}
+            "#,
+            input = input_path.to_string_lossy().replace("'", "''"),
+            out_dir = parent_dir.to_string_lossy().replace("'", "''"),
+            base_name = base_name
+        );
+
+        let mut cmd = Command::new("powershell");
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
+        let res = cmd.output().map_err(|e| format!("Gagal menjalankan konversi PDF: {}", e))?;
+
+        let first_png = parent_dir.join(format!("{}.png", base_name));
+        if !res.status.success() || !first_png.exists() {
+            let err_msg = String::from_utf8_lossy(&res.stderr);
+            return Err(format!("Gagal merender PDF ke gambar: {}", err_msg.trim()));
+        }
+
+        // If target is PNG, output is already rendered!
+        if target_ext == "png" {
+            let size = fs::metadata(&first_png).map(|m| m.len()).unwrap_or(0);
+            return Ok((first_png.to_string_lossy().to_string(), size));
+        }
+
+        // Convert generated PNG(s) to target format (JPG, WEBP, BMP, TIFF)
+        let pattern_dir = parent_dir.to_path_buf();
+        if let Ok(entries) = fs::read_dir(&pattern_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if let Some(file_name) = p.file_name().and_then(|n| n.to_str()) {
+                    if file_name.starts_with(&base_name) && file_name.ends_with(".png") {
+                        let target_file_name = file_name.replace(".png", &format!(".{}", target_ext));
+                        let target_path = pattern_dir.join(target_file_name);
+
+                        // 1. Try Rust image crate
+                        let mut ok = false;
+                        if let Ok(img) = image::open(&p) {
+                            if img.save(&target_path).is_ok() {
+                                ok = true;
+                            }
+                        }
+
+                        // 2. Fallback to FFmpeg
+                        if !ok {
+                            if let Some(ffmpeg) = find_ffmpeg() {
+                                let mut ff_cmd = Command::new(ffmpeg);
+                                ff_cmd.creation_flags(CREATE_NO_WINDOW);
+                                ff_cmd.args(["-y", "-i", p.to_string_lossy().as_ref(), target_path.to_string_lossy().as_ref()]);
+                                let _ = ff_cmd.output();
+                            }
+                        }
+
+                        // Clean up temporary PNG if target is not PNG
+                        let _ = fs::remove_file(&p);
+                    }
+                }
+            }
+        }
+
+        let primary_output = parent_dir.join(format!("{}.{}", base_name, target_ext));
+        let size = fs::metadata(&primary_output).map(|m| m.len()).unwrap_or(0);
+        return Ok((primary_output.to_string_lossy().to_string(), size));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let fmt = if target_ext == "jpg" || target_ext == "jpeg" { "jpeg" } else { "png" };
+        let mut cmd = Command::new("sips");
+        cmd.args(["-s", "format", fmt, input_path.to_string_lossy().as_ref(), "--out", _output_path.to_string_lossy().as_ref()]);
+        let res = cmd.output().map_err(|e| format!("Gagal memanggil sips di macOS: {}", e))?;
+        if res.status.success() && _output_path.exists() {
+            let size = fs::metadata(_output_path).map(|m| m.len()).unwrap_or(0);
+            return Ok((_output_path.to_string_lossy().to_string(), size));
+        }
+        return Err("Gagal mengonversi PDF via sips di macOS".to_string());
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = (input_path, _output_path, parent_dir, stem, target_ext);
+        Err("Konversi PDF ke gambar tidak didukung di platform ini".to_string())
+    }
+}
+
 fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResult, String> {
     let p = Path::new(input_path);
     if !p.exists() {
@@ -577,7 +730,22 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
     }
 
     // ==========================================
-    // 4. IMAGE -> PDF (Pure Rust native)
+    // 4. PDF -> IMAGES (PNG, JPG, WEBP, BMP, TIFF)
+    // ==========================================
+    if src_ext == "pdf" && (native_images.contains(&target_ext.as_str()) || extended_images.contains(&target_ext.as_str())) {
+        let (actual_out_path, size) = convert_pdf_to_images(p, &output_path, parent_dir, stem, &target_ext)?;
+        return Ok(ConvertResult {
+            success: true,
+            input_path: input_path.to_string(),
+            output_path: actual_out_path,
+            output_filename,
+            message: format!("Berhasil merender PDF ke {}", target_ext.to_uppercase()),
+            size_bytes: size,
+        });
+    }
+
+    // ==========================================
+    // 5. IMAGE -> PDF (Pure Rust native)
     // ==========================================
     if (native_images.contains(&src_ext.as_str()) || extended_images.contains(&src_ext.as_str())) && target_ext == "pdf" {
         if native_images.contains(&src_ext.as_str()) {
