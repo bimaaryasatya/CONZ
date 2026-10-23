@@ -300,27 +300,52 @@ fn image_to_pdf(input_path: &Path, output_path: &Path) -> Result<(), String> {
 
 // Helper to locate FFmpeg binary
 fn find_ffmpeg() -> Option<PathBuf> {
-    // 1. Check beside current executable or in bin/
+    // 1. Current executable directory & parents
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(parent) = exe_path.parent() {
-            let p1 = parent.join("ffmpeg.exe");
-            if p1.exists() { return Some(p1); }
-            let p2 = parent.join("bin").join("ffmpeg.exe");
-            if p2.exists() { return Some(p2); }
-            let p3 = parent.join("../bin/ffmpeg.exe");
-            if p3.exists() { return Some(p3); }
+            let candidates = [
+                parent.join("ffmpeg.exe"),
+                parent.join("bin").join("ffmpeg.exe"),
+                parent.join("resources").join("bin").join("ffmpeg.exe"),
+                parent.join("resources").join("ffmpeg.exe"),
+                parent.join("../../bin/ffmpeg.exe"),
+                parent.join("../../../bin/ffmpeg.exe"),
+            ];
+            for c in &candidates {
+                if c.exists() { return Some(c.clone()); }
+            }
         }
     }
 
-    // 2. Check local workspace bin folder
-    let local_bin = PathBuf::from(r"src-tauri\bin\ffmpeg.exe");
-    if local_bin.exists() {
-        return Some(local_bin);
+    // 2. Current working directory
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidates = [
+            cwd.join("ffmpeg.exe"),
+            cwd.join("bin").join("ffmpeg.exe"),
+            cwd.join("src-tauri").join("bin").join("ffmpeg.exe"),
+            cwd.join("../bin/ffmpeg.exe"),
+        ];
+        for c in &candidates {
+            if c.exists() { return Some(c.clone()); }
+        }
     }
 
-    // 3. Check WinGet package location
+    // 3. User local app data (Installed CONZ, WinGet links & packages)
     if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        let winget_path = PathBuf::from(&local_app_data).join("Microsoft").join("WinGet").join("Packages");
+        let local_dir = PathBuf::from(&local_app_data);
+        let candidates = [
+            local_dir.join("CONZ").join("bin").join("ffmpeg.exe"),
+            local_dir.join("CONZ").join("ffmpeg.exe"),
+            local_dir.join("Programs").join("CONZ").join("bin").join("ffmpeg.exe"),
+            local_dir.join("Programs").join("CONZ").join("resources").join("bin").join("ffmpeg.exe"),
+            local_dir.join("Microsoft").join("WinGet").join("Links").join("ffmpeg.exe"),
+        ];
+        for c in &candidates {
+            if c.exists() { return Some(c.clone()); }
+        }
+
+        // WinGet Packages folder
+        let winget_path = local_dir.join("Microsoft").join("WinGet").join("Packages");
         if winget_path.exists() {
             if let Ok(entries) = fs::read_dir(&winget_path) {
                 for entry in entries.flatten() {
@@ -345,7 +370,16 @@ fn find_ffmpeg() -> Option<PathBuf> {
         }
     }
 
-    // 4. Check system PATH
+    // 4. Program Files
+    let prog_files = [
+        PathBuf::from(r"C:\Program Files\ffmpeg\bin\ffmpeg.exe"),
+        PathBuf::from(r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe"),
+    ];
+    for p in &prog_files {
+        if p.exists() { return Some(p.clone()); }
+    }
+
+    // 5. System PATH via where.exe
     #[cfg(target_os = "windows")]
     {
         let path_output = Command::new("where.exe")
@@ -371,14 +405,14 @@ fn convert_subtitles(input_path: &Path, output_path: &Path, src_ext: &str, targe
     let content = fs::read_to_string(input_path).map_err(|e| format!("Gagal membaca subtitle: {}", e))?;
     let result = match (src_ext, target_ext) {
         ("srt", "vtt") => {
-            let mut out = String::from("WEBVTT\n\n");
+            let mut out = String::from("WEBVTT\r\n\r\n");
             for line in content.lines() {
                 if line.contains("-->") {
                     out.push_str(&line.replace(',', "."));
                 } else {
                     out.push_str(line);
                 }
-                out.push('\n');
+                out.push_str("\r\n");
             }
             out
         }
@@ -398,7 +432,7 @@ fn convert_subtitles(input_path: &Path, output_path: &Path, src_ext: &str, targe
                 } else {
                     out.push_str(line);
                 }
-                out.push('\n');
+                out.push_str("\r\n");
             }
             out
         }
@@ -410,7 +444,7 @@ fn convert_subtitles(input_path: &Path, output_path: &Path, src_ext: &str, targe
                     continue;
                 }
                 out.push_str(trimmed);
-                out.push('\n');
+                out.push_str("\r\n");
             }
             out
         }
@@ -440,7 +474,119 @@ fn convert_delimited(input_path: &Path, output_path: &Path, from_delim: char, to
     Ok(())
 }
 
-// Archive conversion via tar.exe
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn md_to_html(content: &str, title: &str) -> String {
+    let mut body = String::new();
+    let mut in_code_block = false;
+    let mut in_list = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            if in_code_block {
+                body.push_str("</code></pre>\r\n");
+                in_code_block = false;
+            } else {
+                body.push_str("<pre><code>");
+                in_code_block = true;
+            }
+            continue;
+        }
+        if in_code_block {
+            body.push_str(&html_escape(line));
+            body.push_str("\r\n");
+            continue;
+        }
+        if trimmed.is_empty() {
+            if in_list {
+                body.push_str("</ul>\r\n");
+                in_list = false;
+            }
+            continue;
+        }
+        if trimmed.starts_with("# ") {
+            body.push_str(&format!("<h1>{}</h1>\r\n", html_escape(&trimmed[2..])));
+        } else if trimmed.starts_with("## ") {
+            body.push_str(&format!("<h2>{}</h2>\r\n", html_escape(&trimmed[3..])));
+        } else if trimmed.starts_with("### ") {
+            body.push_str(&format!("<h3>{}</h3>\r\n", html_escape(&trimmed[4..])));
+        } else if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+            if !in_list {
+                body.push_str("<ul>\r\n");
+                in_list = true;
+            }
+            body.push_str(&format!("<li>{}</li>\r\n", html_escape(&trimmed[2..])));
+        } else {
+            if in_list {
+                body.push_str("</ul>\r\n");
+                in_list = false;
+            }
+            body.push_str(&format!("<p>{}</p>\r\n", html_escape(line)));
+        }
+    }
+    if in_list {
+        body.push_str("</ul>\r\n");
+    }
+    if in_code_block {
+        body.push_str("</code></pre>\r\n");
+    }
+
+    format!(
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{}</title><style>body{{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;line-height:1.6;padding:2rem;max-width:800px;margin:auto;color:#1e293b;}}pre{{background:#f1f5f9;padding:1rem;border-radius:6px;overflow-x:auto;}}code{{font-family:monospace;}}h1,h2,h3{{color:#0f172a;}}</style></head><body>{}</body></html>",
+        html_escape(title),
+        body
+    )
+}
+
+fn md_to_txt(content: &str) -> String {
+    let mut out = String::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            continue;
+        }
+        let stripped = if let Some(s) = trimmed.strip_prefix("# ") {
+            s
+        } else if let Some(s) = trimmed.strip_prefix("## ") {
+            s
+        } else if let Some(s) = trimmed.strip_prefix("### ") {
+            s
+        } else if let Some(s) = trimmed.strip_prefix("- ") {
+            s
+        } else if let Some(s) = trimmed.strip_prefix("* ") {
+            s
+        } else {
+            line
+        };
+        out.push_str(stripped);
+        out.push_str("\r\n");
+    }
+    out
+}
+
+fn txt_to_html(content: &str, title: &str) -> String {
+    let mut body = String::new();
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            body.push_str("<br/>\r\n");
+        } else {
+            body.push_str(&format!("<p>{}</p>\r\n", html_escape(line)));
+        }
+    }
+    format!(
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{}</title><style>body{{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;line-height:1.6;padding:2rem;max-width:800px;margin:auto;color:#1e293b;}}</style></head><body>{}</body></html>",
+        html_escape(title),
+        body
+    )
+}
+
+// Archive conversion via tar.exe / WinRAR / PowerShell
 fn convert_archive(input_path: &Path, output_path: &Path, target_ext: &str) -> Result<(), String> {
     let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
     let temp_dir = std::env::temp_dir().join(format!("conz_arch_{}", millis));
@@ -448,12 +594,43 @@ fn convert_archive(input_path: &Path, output_path: &Path, target_ext: &str) -> R
 
     #[cfg(target_os = "windows")]
     {
-        // 1. Extract input archive
-        let mut extract_cmd = Command::new("tar.exe");
-        extract_cmd.creation_flags(CREATE_NO_WINDOW);
-        extract_cmd.args(["-xf", input_path.to_string_lossy().as_ref(), "-C", temp_dir.to_string_lossy().as_ref()]);
-        let extract_res = extract_cmd.output();
-        if extract_res.is_err() || !extract_res.as_ref().unwrap().status.success() {
+        let src_ext = input_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        let mut extracted = false;
+
+        // 1. Try WinRAR if installed
+        let winrar_paths = [
+            PathBuf::from(r"C:\Program Files\WinRAR\WinRAR.exe"),
+            PathBuf::from(r"C:\Program Files\WinRAR\UnRAR.exe"),
+            PathBuf::from(r"C:\Program Files (x86)\WinRAR\WinRAR.exe"),
+        ];
+        for wr in &winrar_paths {
+            if wr.exists() {
+                let mut wr_cmd = Command::new(wr);
+                wr_cmd.creation_flags(CREATE_NO_WINDOW);
+                wr_cmd.args(["x", "-y", input_path.to_string_lossy().as_ref(), temp_dir.to_string_lossy().as_ref()]);
+                if let Ok(res) = wr_cmd.output() {
+                    if res.status.success() {
+                        extracted = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 2. Try tar.exe
+        if !extracted {
+            let mut extract_cmd = Command::new("tar.exe");
+            extract_cmd.creation_flags(CREATE_NO_WINDOW);
+            extract_cmd.args(["-xf", input_path.to_string_lossy().as_ref(), "-C", temp_dir.to_string_lossy().as_ref()]);
+            if let Ok(res) = extract_cmd.output() {
+                if res.status.success() {
+                    extracted = true;
+                }
+            }
+        }
+
+        // 3. Fallback to PowerShell Expand-Archive (for ZIP)
+        if !extracted && src_ext == "zip" {
             let ps_script = format!("Expand-Archive -LiteralPath '{in_p}' -DestinationPath '{out_p}' -Force",
                 in_p = input_path.to_string_lossy().replace("'", "''"),
                 out_p = temp_dir.to_string_lossy().replace("'", "''")
@@ -464,7 +641,7 @@ fn convert_archive(input_path: &Path, output_path: &Path, target_ext: &str) -> R
             let _ = ps_cmd.output();
         }
 
-        // 2. Compress to target archive
+        // 4. Compress to target archive
         let mut comp_cmd = Command::new("tar.exe");
         comp_cmd.creation_flags(CREATE_NO_WINDOW);
         match target_ext {
@@ -475,13 +652,28 @@ fn convert_archive(input_path: &Path, output_path: &Path, target_ext: &str) -> R
                 comp_cmd.args(["-czf", output_path.to_string_lossy().as_ref(), "-C", temp_dir.to_string_lossy().as_ref(), "."]);
             }
             _ => {
+                // Default ZIP
                 comp_cmd.args(["-a", "-cf", output_path.to_string_lossy().as_ref(), "-C", temp_dir.to_string_lossy().as_ref(), "."]);
             }
         }
-        let comp_res = comp_cmd.output().map_err(|e| format!("Gagal mengompresi arsip: {}", e))?;
+        let comp_res = comp_cmd.output();
+        let success = comp_res.map(|r| r.status.success()).unwrap_or(false);
+
+        // Fallback to PowerShell Compress-Archive if target is zip and tar failed
+        if !success && (target_ext == "zip") {
+            let ps_comp = format!("Compress-Archive -Path '{in_p}\\*' -DestinationPath '{out_p}' -Force",
+                in_p = temp_dir.to_string_lossy().replace("'", "''"),
+                out_p = output_path.to_string_lossy().replace("'", "''")
+            );
+            let mut ps_cmd = Command::new("powershell");
+            ps_cmd.creation_flags(CREATE_NO_WINDOW);
+            ps_cmd.args(["-NoProfile", "-Command", &ps_comp]);
+            let _ = ps_cmd.output();
+        }
+
         let _ = fs::remove_dir_all(&temp_dir);
 
-        if !comp_res.status.success() {
+        if !output_path.exists() {
             return Err("Gagal membuat arsip target".to_string());
         }
     }
@@ -582,7 +774,7 @@ fn convert_pdf_to_images(
             return Ok((first_png.to_string_lossy().to_string(), size));
         }
 
-        // Convert generated PNG(s) to target format (JPG, WEBP, BMP, TIFF)
+        // Convert generated PNG(s) to target format (JPG, WEBP, BMP, TIFF, AVIF)
         let pattern_dir = parent_dir.to_path_buf();
         if let Ok(entries) = fs::read_dir(&pattern_dir) {
             for entry in entries.flatten() {
@@ -592,8 +784,8 @@ fn convert_pdf_to_images(
                         let target_file_name = file_name.replace(".png", &format!(".{}", target_ext));
                         let target_path = pattern_dir.join(target_file_name);
 
-                        // 1. Try Rust image crate
                         let mut ok = false;
+                        // 1. Try Rust image crate
                         if let Ok(img) = image::open(&p) {
                             if img.save(&target_path).is_ok() {
                                 ok = true;
@@ -668,6 +860,8 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
     let extended_images = ["heic", "tiff", "tif", "avif", "svg"];
     let subtitle_extensions = ["srt", "vtt"];
     let archive_extensions = ["zip", "tar", "gz", "gzip", "tgz", "rar", "7z"];
+    let spreadsheet_extensions = ["xlsx", "xls", "ods", "csv", "tsv"];
+    let document_extensions = ["docx", "doc", "rtf", "txt", "md", "markdown", "html", "htm"];
 
     // ==========================================
     // 1. SUBTITLES (SRT <-> VTT <-> TXT)
@@ -686,7 +880,7 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
     }
 
     // ==========================================
-    // 2. DELIMITED SPREADSHEETS (CSV <-> TSV)
+    // 2. DELIMITED SPREADSHEETS (CSV <-> TSV pure Rust)
     // ==========================================
     if src_ext == "csv" && target_ext == "tsv" {
         convert_delimited(p, &output_path, ',', '\t')?;
@@ -714,9 +908,9 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
     }
 
     // ==========================================
-    // 3. ARCHIVES (ZIP, TAR, GZ, RAR)
+    // 3. ARCHIVES (ZIP, TAR, GZ, RAR, 7Z)
     // ==========================================
-    if archive_extensions.contains(&src_ext.as_str()) && ["zip", "tar", "gz"].contains(&target_ext.as_str()) {
+    if archive_extensions.contains(&src_ext.as_str()) && ["zip", "tar", "gz", "tgz", "gzip"].contains(&target_ext.as_str()) {
         convert_archive(p, &output_path, &target_ext)?;
         let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
         return Ok(ConvertResult {
@@ -748,18 +942,16 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
     // 5. IMAGE -> PDF (Pure Rust native)
     // ==========================================
     if (native_images.contains(&src_ext.as_str()) || extended_images.contains(&src_ext.as_str())) && target_ext == "pdf" {
-        if native_images.contains(&src_ext.as_str()) {
-            if image_to_pdf(p, &output_path).is_ok() {
-                let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-                return Ok(ConvertResult {
-                    success: true,
-                    input_path: input_path.to_string(),
-                    output_path: output_path_str,
-                    output_filename,
-                    message: "Berhasil dikonversi ke PDF".to_string(),
-                    size_bytes: size,
-                });
-            }
+        if image_to_pdf(p, &output_path).is_ok() {
+            let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+            return Ok(ConvertResult {
+                success: true,
+                input_path: input_path.to_string(),
+                output_path: output_path_str,
+                output_filename,
+                message: "Berhasil dikonversi ke PDF".to_string(),
+                size_bytes: size,
+            });
         }
         // Fallback to FFmpeg for HEIC / AVIF / TIFF / SVG -> PDF
         if let Some(ffmpeg) = find_ffmpeg() {
@@ -783,9 +975,10 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
     }
 
     // ==========================================
-    // 5. NATIVE IMAGE -> NATIVE IMAGE
+    // 6. NATIVE IMAGE -> NATIVE IMAGE (JPG, PNG, BMP)
     // ==========================================
-    if native_images.contains(&src_ext.as_str()) && native_images.contains(&target_ext.as_str()) {
+    if (src_ext == "png" || src_ext == "jpg" || src_ext == "jpeg" || src_ext == "bmp") &&
+       (target_ext == "png" || target_ext == "jpg" || target_ext == "jpeg" || target_ext == "bmp") {
         if let Ok(img) = image::open(p) {
             if img.save(&output_path).is_ok() {
                 let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
@@ -802,7 +995,7 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
     }
 
     // ==========================================
-    // 6. AUDIO & VIDEO & EXTENDED IMAGES (via FFmpeg)
+    // 7. EXTENDED IMAGES & AUDIO & VIDEO (via FFmpeg)
     // ==========================================
     let is_audio = audio_extensions.contains(&src_ext.as_str());
     let is_video = video_extensions.contains(&src_ext.as_str());
@@ -820,19 +1013,42 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
             cmd.arg("-i");
             cmd.arg(input_path);
 
-            // Audio extraction from video
             if is_video && target_ext == "mp3" {
                 cmd.args(["-vn", "-c:a", "libmp3lame", "-q:a", "2"]);
             } else if is_video && target_ext == "gif" {
                 cmd.args(["-vf", "fps=12,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse"]);
             } else if src_ext == "gif" && target_ext == "mp4" {
-                cmd.args(["-movflags", "faststart", "-pix_fmt", "yuv420p"]);
+                cmd.args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "faststart"]);
+            } else if is_img && target_ext == "ico" {
+                cmd.args(["-vf", "scale=256:256:force_original_aspect_ratio=decrease"]);
+            } else if is_img && target_ext == "webp" {
+                cmd.args(["-c:v", "libwebp", "-lossless", "0", "-q:v", "85"]);
+            } else if is_img && target_ext == "avif" {
+                cmd.args(["-c:v", "libaom-av1", "-crf", "28"]);
+            } else if is_img && (target_ext == "jpg" || target_ext == "jpeg") {
+                cmd.args(["-q:v", "2"]);
+            } else if is_audio && target_ext == "mp3" {
+                cmd.args(["-c:a", "libmp3lame", "-q:a", "2"]);
+            } else if is_audio && target_ext == "wav" {
+                cmd.args(["-c:a", "pcm_s16le"]);
+            } else if is_audio && target_ext == "m4a" {
+                cmd.args(["-c:a", "aac", "-b:a", "192k"]);
+            } else if is_audio && target_ext == "flac" {
+                cmd.args(["-c:a", "flac"]);
+            } else if is_audio && target_ext == "ogg" {
+                cmd.args(["-c:a", "libvorbis", "-q:a", "4"]);
+            } else if is_audio && target_ext == "opus" {
+                cmd.args(["-c:a", "libopus", "-b:a", "128k"]);
+            } else if is_video && target_ext == "mp4" {
+                cmd.args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "faststart"]);
+            } else if is_video && target_ext == "webm" {
+                cmd.args(["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "30", "-c:a", "libopus"]);
             }
 
             cmd.arg(&output_path_str);
 
             let res = cmd.output().map_err(|e| format!("Gagal memanggil FFmpeg: {}", e))?;
-            if res.status.success() {
+            if res.status.success() && output_path.exists() {
                 let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
                 return Ok(ConvertResult {
                     success: true,
@@ -853,28 +1069,82 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
     }
 
     // ==========================================
-    // 7. MICROSOFT OFFICE COM (WORD, EXCEL, PPT)
+    // 8. PURE RUST TEXT & MARKDOWN
+    // ==========================================
+    if (src_ext == "md" || src_ext == "markdown") && (target_ext == "txt" || target_ext == "html") {
+        let raw = fs::read_to_string(p).map_err(|e| format!("Gagal membaca markdown: {}", e))?;
+        let out_content = if target_ext == "html" {
+            md_to_html(&raw, stem)
+        } else {
+            md_to_txt(&raw)
+        };
+        fs::write(&output_path, out_content).map_err(|e| format!("Gagal menyimpan file: {}", e))?;
+        let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+        return Ok(ConvertResult {
+            success: true,
+            input_path: input_path.to_string(),
+            output_path: output_path_str,
+            output_filename,
+            message: format!("Berhasil dikonversi ke {}", target_ext.to_uppercase()),
+            size_bytes: size,
+        });
+    }
+
+    if src_ext == "txt" && (target_ext == "md" || target_ext == "html") {
+        let raw = fs::read_to_string(p).map_err(|e| format!("Gagal membaca text: {}", e))?;
+        let out_content = if target_ext == "html" {
+            txt_to_html(&raw, stem)
+        } else {
+            raw
+        };
+        fs::write(&output_path, out_content).map_err(|e| format!("Gagal menyimpan file: {}", e))?;
+        let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+        return Ok(ConvertResult {
+            success: true,
+            input_path: input_path.to_string(),
+            output_path: output_path_str,
+            output_filename,
+            message: format!("Berhasil dikonversi ke {}", target_ext.to_uppercase()),
+            size_bytes: size,
+        });
+    }
+
+    // ==========================================
+    // 9. SPREADSHEETS (XLSX, XLS, ODS, CSV, TSV) via Excel COM
     // ==========================================
     #[cfg(target_os = "windows")]
-    {
-        // Word -> PDF / TXT / HTML / DOCX
-        if (src_ext == "docx" || src_ext == "doc" || src_ext == "rtf") && ["pdf", "txt", "html", "docx"].contains(&target_ext.as_str()) {
-            let format_code = match target_ext.as_str() {
-                "pdf" => 17, // wdFormatPDF
-                "txt" => 2,  // wdFormatText
-                "html" => 8, // wdFormatHTML
-                _ => 16,     // wdFormatXMLDocument (DOCX)
-            };
-            let script = format!(
+    if spreadsheet_extensions.contains(&src_ext.as_str()) && ["xlsx", "csv", "tsv", "ods", "pdf"].contains(&target_ext.as_str()) {
+        let code = match target_ext.as_str() {
+            "csv" | "tsv" => 6,  // xlCSV
+            "ods" => 60,         // xlOpenDocumentSpreadsheet
+            _ => 51,             // xlOpenXMLWorkbook (XLSX)
+        };
+
+        let temp_csv = if target_ext == "tsv" {
+            Some(parent_dir.join(format!("{}_temp.csv", stem)))
+        } else {
+            None
+        };
+
+        let target_save_path = if let Some(ref tc) = temp_csv {
+            tc.to_string_lossy().replace("'", "''")
+        } else {
+            output_path.to_string_lossy().replace("'", "''")
+        };
+
+        let script = if target_ext == "pdf" {
+            format!(
                 r#"
                 $ErrorActionPreference = 'Stop'
                 try {{
-                    $word = New-Object -ComObject Word.Application
-                    $word.Visible = $false
-                    $doc = $word.Documents.Open('{input}')
-                    $doc.SaveAs([ref]'{output}', [ref]{code})
-                    $doc.Close([ref]0)
-                    $word.Quit()
+                    $excel = New-Object -ComObject Excel.Application
+                    $excel.Visible = $false
+                    $excel.DisplayAlerts = $false
+                    $excel.ScreenUpdating = $false
+                    $wb = $excel.Workbooks.Open('{input}')
+                    $wb.ExportAsFixedFormat(0, '{output}')
+                    $wb.Close($false)
+                    $excel.Quit()
                     exit 0
                 }} catch {{
                     Write-Error $_.Exception.Message
@@ -882,43 +1152,21 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
                 }}
                 "#,
                 input = p.to_string_lossy().replace("'", "''"),
-                output = output_path.to_string_lossy().replace("'", "''"),
-                code = format_code
-            );
-            let mut cmd = Command::new("powershell");
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
-            if let Ok(res) = cmd.output() {
-                if res.status.success() {
-                    let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-                    return Ok(ConvertResult {
-                        success: true,
-                        input_path: input_path.to_string(),
-                        output_path: output_path_str,
-                        output_filename,
-                        message: format!("Berhasil dikonversi ke {}", target_ext.to_uppercase()),
-                        size_bytes: size,
-                    });
-                }
-            }
-        }
-
-        // PowerPoint -> PDF / JPG / PNG
-        if (src_ext == "pptx" || src_ext == "ppt") && ["pdf", "jpg", "png"].contains(&target_ext.as_str()) {
-            let format_code = match target_ext.as_str() {
-                "pdf" => 32, // ppSaveAsPDF
-                "jpg" => 17, // ppSaveAsJPG
-                _ => 18,     // ppSaveAsPNG
-            };
-            let script = format!(
+                output = output_path.to_string_lossy().replace("'", "''")
+            )
+        } else {
+            format!(
                 r#"
                 $ErrorActionPreference = 'Stop'
                 try {{
-                    $ppt = New-Object -ComObject PowerPoint.Application
-                    $pres = $ppt.Presentations.Open('{input}', [Microsoft.Office.Core.MsoTriState]::msoTrue, [Microsoft.Office.Core.MsoTriState]::msoFalse, [Microsoft.Office.Core.MsoTriState]::msoFalse)
-                    $pres.SaveAs('{output}', {code})
-                    $pres.Close()
-                    $ppt.Quit()
+                    $excel = New-Object -ComObject Excel.Application
+                    $excel.Visible = $false
+                    $excel.DisplayAlerts = $false
+                    $excel.ScreenUpdating = $false
+                    $wb = $excel.Workbooks.Open('{input}')
+                    $wb.SaveAs('{output}', {code})
+                    $wb.Close($false)
+                    $excel.Quit()
                     exit 0
                 }} catch {{
                     Write-Error $_.Exception.Message
@@ -926,118 +1174,24 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
                 }}
                 "#,
                 input = p.to_string_lossy().replace("'", "''"),
-                output = output_path.to_string_lossy().replace("'", "''"),
-                code = format_code
-            );
-            let mut cmd = Command::new("powershell");
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
-            if let Ok(res) = cmd.output() {
-                if res.status.success() {
-                    let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-                    return Ok(ConvertResult {
-                        success: true,
-                        input_path: input_path.to_string(),
-                        output_path: output_path_str,
-                        output_filename,
-                        message: format!("Berhasil dikonversi ke {}", target_ext.to_uppercase()),
-                        size_bytes: size,
-                    });
-                }
-            }
-        }
-
-        // Excel -> PDF / CSV / ODS / XLSX
-        if (src_ext == "xlsx" || src_ext == "xls" || src_ext == "ods") && ["pdf", "csv", "xlsx"].contains(&target_ext.as_str()) {
-            let script = if target_ext == "pdf" {
-                format!(
-                    r#"
-                    $ErrorActionPreference = 'Stop'
-                    try {{
-                        $excel = New-Object -ComObject Excel.Application
-                        $excel.Visible = $false
-                        $wb = $excel.Workbooks.Open('{input}')
-                        $wb.ExportAsFixedFormat(0, '{output}')
-                        $wb.Close($false)
-                        $excel.Quit()
-                        exit 0
-                    }} catch {{
-                        Write-Error $_.Exception.Message
-                        exit 1
-                    }}
-                    "#,
-                    input = p.to_string_lossy().replace("'", "''"),
-                    output = output_path.to_string_lossy().replace("'", "''")
-                )
-            } else {
-                let code = if target_ext == "csv" { 6 } else { 51 };
-                format!(
-                    r#"
-                    $ErrorActionPreference = 'Stop'
-                    try {{
-                        $excel = New-Object -ComObject Excel.Application
-                        $excel.Visible = $false
-                        $wb = $excel.Workbooks.Open('{input}')
-                        $wb.SaveAs('{output}', {code})
-                        $wb.Close($false)
-                        $excel.Quit()
-                        exit 0
-                    }} catch {{
-                        Write-Error $_.Exception.Message
-                        exit 1
-                    }}
-                    "#,
-                    input = p.to_string_lossy().replace("'", "''"),
-                    output = output_path.to_string_lossy().replace("'", "''"),
-                    code = code
-                )
-            };
-            let mut cmd = Command::new("powershell");
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
-            if let Ok(res) = cmd.output() {
-                if res.status.success() {
-                    let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-                    return Ok(ConvertResult {
-                        success: true,
-                        input_path: input_path.to_string(),
-                        output_path: output_path_str,
-                        output_filename,
-                        message: format!("Berhasil dikonversi ke {}", target_ext.to_uppercase()),
-                        size_bytes: size,
-                    });
-                }
-            }
-        }
-
-        // PDF -> DOCX / TXT via Word
-        if src_ext == "pdf" && ["docx", "txt"].contains(&target_ext.as_str()) {
-            let code = if target_ext == "docx" { 16 } else { 2 };
-            let script = format!(
-                r#"
-                $ErrorActionPreference = 'Stop'
-                try {{
-                    $word = New-Object -ComObject Word.Application
-                    $word.Visible = $false
-                    $doc = $word.Documents.Open('{input}', [ref]$false, [ref]$true)
-                    $doc.SaveAs([ref]'{output}', [ref]{code})
-                    $doc.Close([ref]0)
-                    $word.Quit()
-                    exit 0
-                }} catch {{
-                    Write-Error $_.Exception.Message
-                    exit 1
-                }}
-                "#,
-                input = p.to_string_lossy().replace("'", "''"),
-                output = output_path.to_string_lossy().replace("'", "''"),
+                output = target_save_path,
                 code = code
-            );
-            let mut cmd = Command::new("powershell");
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
-            if let Ok(res) = cmd.output() {
-                if res.status.success() {
+            )
+        };
+
+        let mut cmd = Command::new("powershell");
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
+        if let Ok(res) = cmd.output() {
+            if res.status.success() {
+                if let Some(ref tc) = temp_csv {
+                    if tc.exists() {
+                        let _ = convert_delimited(tc, &output_path, ',', '\t');
+                        let _ = fs::remove_file(tc);
+                    }
+                }
+
+                if output_path.exists() {
                     let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
                     return Ok(ConvertResult {
                         success: true,
@@ -1050,116 +1204,159 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
                 }
             }
         }
+    }
 
-        #[cfg(target_os = "macos")]
-        {
-            // 1. Try Microsoft Word via AppleScript if installed
-            if Path::new("/Applications/Microsoft Word.app").exists() {
-                let script = format!(
-                    r#"
-                    tell application "Microsoft Word"
-                        set isRunning to running
-                        open POSIX file "{input}"
-                        set activeDoc to active document
-                        save as activeDoc file name "{output}" file format format PDF
-                        close activeDoc saving no
-                        if not isRunning then
-                            quit
-                        end if
-                    end tell
-                    "#,
-                    input = p.to_string_lossy().replace("\"", "\\\""),
-                    output = output_path.to_string_lossy().replace("\"", "\\\"")
-                );
+    // ==========================================
+    // 10. PRESENTATIONS (PPTX, PPT) via PowerPoint COM
+    // ==========================================
+    #[cfg(target_os = "windows")]
+    if (src_ext == "pptx" || src_ext == "ppt") && ["pdf", "pptx", "jpg", "png"].contains(&target_ext.as_str()) {
+        let format_code = match target_ext.as_str() {
+            "pdf" => 32,  // ppSaveAsPDF
+            "pptx" => 24, // ppSaveAsOpenXMLPresentation
+            "jpg" => 17,  // ppSaveAsJPG
+            _ => 18,      // ppSaveAsPNG
+        };
+        let script = format!(
+            r#"
+            $ErrorActionPreference = 'Stop'
+            try {{
+                $ppt = New-Object -ComObject PowerPoint.Application
+                $ppt.DisplayAlerts = [Microsoft.Office.Interop.PowerPoint.PpAlertLevel]::ppAlertsNone
+                $pres = $ppt.Presentations.Open('{input}', [Microsoft.Office.Core.MsoTriState]::msoTrue, [Microsoft.Office.Core.MsoTriState]::msoFalse, [Microsoft.Office.Core.MsoTriState]::msoFalse)
+                $pres.SaveAs('{output}', {code})
+                $pres.Close()
+                $ppt.Quit()
+                exit 0
+            }} catch {{
+                Write-Error $_.Exception.Message
+                exit 1
+            }}
+            "#,
+            input = p.to_string_lossy().replace("'", "''"),
+            output = output_path.to_string_lossy().replace("'", "''"),
+            code = format_code
+        );
+        let mut cmd = Command::new("powershell");
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
+        if let Ok(res) = cmd.output() {
+            if res.status.success() {
+                if !output_path.exists() {
+                    let folder_candidate = parent_dir.join(format!("{}_converted", stem));
+                    if folder_candidate.exists() && folder_candidate.is_dir() {
+                        let ext_cap = target_ext.to_uppercase();
+                        let first_slide = folder_candidate.join(format!("Slide1.{}", ext_cap));
+                        if first_slide.exists() {
+                            let _ = fs::copy(&first_slide, &output_path);
+                        }
+                    }
+                }
 
-                if let Ok(res) = Command::new("osascript").args(["-e", &script]).output() {
-                    if res.status.success() && output_path.exists() {
+                if output_path.exists() {
+                    let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                    return Ok(ConvertResult {
+                        success: true,
+                        input_path: input_path.to_string(),
+                        output_path: output_path_str,
+                        output_filename,
+                        message: format!("Berhasil dikonversi ke {}", target_ext.to_uppercase()),
+                        size_bytes: size,
+                    });
+                }
+            }
+        }
+    }
+
+    // ==========================================
+    // 11. DOCUMENTS (DOCX, DOC, RTF, TXT, MD, HTML) & PDF via Word COM
+    // ==========================================
+    #[cfg(target_os = "windows")]
+    if (document_extensions.contains(&src_ext.as_str()) || src_ext == "pdf") &&
+       ["pdf", "docx", "txt", "html", "md", "rtf"].contains(&target_ext.as_str()) {
+        let format_code = match target_ext.as_str() {
+            "pdf" => 17, // wdFormatPDF
+            "txt" | "md" => 2,  // wdFormatText
+            "html" => 8, // wdFormatHTML
+            "rtf" => 6,  // wdFormatRTF
+            _ => 16,     // wdFormatXMLDocument (DOCX)
+        };
+        let script = format!(
+            r#"
+            $ErrorActionPreference = 'Stop'
+            try {{
+                $word = New-Object -ComObject Word.Application
+                $word.Visible = $false
+                $word.DisplayAlerts = 0
+                $word.ScreenUpdating = $false
+                $doc = $word.Documents.Open('{input}', [ref]$false, [ref]$true)
+                $doc.SaveAs([ref]'{output}', [ref]{code})
+                $doc.Close([ref]0)
+                $word.Quit()
+                exit 0
+            }} catch {{
+                Write-Error $_.Exception.Message
+                exit 1
+            }}
+            "#,
+            input = p.to_string_lossy().replace("'", "''"),
+            output = output_path.to_string_lossy().replace("'", "''"),
+            code = format_code
+        );
+        let mut cmd = Command::new("powershell");
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
+        if let Ok(res) = cmd.output() {
+            if res.status.success() && output_path.exists() {
+                let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                return Ok(ConvertResult {
+                    success: true,
+                    input_path: input_path.to_string(),
+                    output_path: output_path_str,
+                    output_filename,
+                    message: format!("Berhasil dikonversi ke {}", target_ext.to_uppercase()),
+                    size_bytes: size,
+                });
+            }
+        }
+    }
+
+    // LibreOffice fallback for macOS / Linux / non-Office systems
+    #[cfg(not(target_os = "windows"))]
+    {
+        let soffice_paths = [
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+            "/usr/bin/soffice",
+            "/usr/bin/libreoffice",
+            "/usr/local/bin/soffice",
+            "/opt/homebrew/bin/soffice",
+        ];
+        for soffice in soffice_paths {
+            if Path::new(soffice).exists() {
+                let mut lo_cmd = Command::new(soffice);
+                lo_cmd.args([
+                    "--headless",
+                    "--convert-to",
+                    &target_ext,
+                    "--outdir",
+                    parent_dir.to_string_lossy().as_ref(),
+                    p.to_string_lossy().as_ref(),
+                ]);
+
+                if let Ok(lo_res) = lo_cmd.output() {
+                    if lo_res.status.success() && output_path.exists() {
                         let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
                         return Ok(ConvertResult {
                             success: true,
                             input_path: input_path.to_string(),
                             output_path: output_path_str,
                             output_filename,
-                            message: "Berhasil dikonversi ke PDF via Microsoft Word".to_string(),
+                            message: format!("Berhasil dikonversi ke {}", target_ext.to_uppercase()),
                             size_bytes: size,
                         });
                     }
                 }
             }
-
-            // 2. Fallback to LibreOffice if installed
-            let soffice_paths = [
-                "/Applications/LibreOffice.app/Contents/MacOS/soffice",
-                "/usr/local/bin/soffice",
-                "/opt/homebrew/bin/soffice",
-            ];
-            for soffice in soffice_paths {
-                if Path::new(soffice).exists() {
-                    let mut lo_cmd = Command::new(soffice);
-                    lo_cmd.args([
-                        "--headless",
-                        "--convert-to",
-                        "pdf",
-                        "--outdir",
-                        parent_dir.to_string_lossy().as_ref(),
-                        p.to_string_lossy().as_ref(),
-                    ]);
-
-                    if let Ok(lo_res) = lo_cmd.output() {
-                        if lo_res.status.success() && output_path.exists() {
-                            let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-                            return Ok(ConvertResult {
-                                success: true,
-                                input_path: input_path.to_string(),
-                                output_path: output_path_str,
-                                output_filename,
-                                message: "Berhasil dikonversi via LibreOffice ke PDF".to_string(),
-                                size_bytes: size,
-                            });
-                        }
-                    }
-                }
-            }
-
-            return Err("Gagal mengonversi dokumen Word. Pastikan Microsoft Word atau LibreOffice terpasang.".to_string());
-        }
-
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        {
-            let soffice_paths = [
-                "/usr/bin/soffice",
-                "/usr/bin/libreoffice",
-                "/usr/local/bin/soffice",
-            ];
-            for soffice in soffice_paths {
-                if Path::new(soffice).exists() {
-                    let mut lo_cmd = Command::new(soffice);
-                    lo_cmd.args([
-                        "--headless",
-                        "--convert-to",
-                        "pdf",
-                        "--outdir",
-                        parent_dir.to_string_lossy().as_ref(),
-                        p.to_string_lossy().as_ref(),
-                    ]);
-
-                    if let Ok(lo_res) = lo_cmd.output() {
-                        if lo_res.status.success() && output_path.exists() {
-                            let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-                            return Ok(ConvertResult {
-                                success: true,
-                                input_path: input_path.to_string(),
-                                output_path: output_path_str,
-                                output_filename,
-                                message: "Berhasil dikonversi via LibreOffice ke PDF".to_string(),
-                                size_bytes: size,
-                            });
-                        }
-                    }
-                }
-            }
-
-            return Err("Gagal mengonversi dokumen Word. Pastikan LibreOffice terpasang.".to_string());
         }
     }
 
@@ -1168,6 +1365,7 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
         src_ext, target_ext
     ))
 }
+
 #[tauri::command]
 async fn convert_file(
     app: tauri::AppHandle,
@@ -1368,7 +1566,7 @@ pub fn run() {
                         }
                     }
                     "quit" => {
-                        app.exit(0);
+                        std::process::exit(0);
                     }
                     _ => {}
                 })

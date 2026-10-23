@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { FormatChamber } from "../types";
 import { FileTypeDefinition } from "../formatRegistry";
+import { playWheelTick, playSelectSound } from "../sound";
 
 interface RevolverMenuProps {
   fileName: string;
@@ -122,6 +123,15 @@ export const RevolverMenu: React.FC<RevolverMenuProps> = ({
     externalActiveIndex !== undefined && externalActiveIndex !== null
       ? externalActiveIndex
       : (internalHoveredIndex !== null ? internalHoveredIndex : initialIndex);
+
+  const prevActiveIndexRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (prevActiveIndexRef.current !== null && prevActiveIndexRef.current !== activeIndex) {
+      playWheelTick(activeIndex);
+    }
+    prevActiveIndexRef.current = activeIndex;
+  }, [activeIndex]);
 
   useEffect(() => {
     requestAnimationFrame(() => setMounted(true));
@@ -266,7 +276,10 @@ export const RevolverMenu: React.FC<RevolverMenuProps> = ({
                 <g
                   key={chamber.format}
                   className={`tangerine-petal ${isActive ? "is-active" : ""}`}
-                  onClick={() => onSelectFormat(chamber.format)}
+                  onClick={() => {
+                    playSelectSound();
+                    onSelectFormat(chamber.format);
+                  }}
                   onMouseEnter={() => setInternalHoveredIndex(index)}
                 >
                   <path
