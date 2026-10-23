@@ -42,12 +42,19 @@ Holding <kbd>Shift</kbd> while dragging a file summons an always-on-top, hardwar
 
 ## Supported Formats
 
-| Category             | Source Formats                                   | Target Formats                          | Processing Engine                     |
-| :------------------- | :----------------------------------------------- | :-------------------------------------- | :------------------------------------ |
-| **Documents**        | `.docx`, `.doc`                                  | `.pdf`, `.txt`, `.html`, `.odt`         | COM Automation / Headless LibreOffice |
-| **Images to PDF**    | `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`, `.ico` | `.pdf`                                  | Native Rust PDF 1.4 Engine            |
-| **Image Conversion** | `.png`, `.jpg`, `.webp`, `.bmp`, `.ico`          | `.png`, `.jpg`, `.webp`, `.bmp`, `.ico` | Native Image Encoder (`image` crate)  |
-| **Data**             | `.csv`                                           | `.json`, `.xlsx`                        | Rust Data Pipeline                    |
+CONZ supports over 50 file formats across 9 dedicated categories, powered by high-performance native engines, bundled portable FFmpeg, and headless document automation:
+
+| Category | Source Formats | Target Formats | Processing Engine |
+| :--- | :--- | :--- | :--- |
+| **Images** | `.png`, `.jpg`, `.jpeg`, `.webp`, `.heic`, `.tiff`, `.tif`, `.avif`, `.bmp`, `.svg` | `.webp`, `.jpg`, `.png`, `.heic`, `.tiff`, `.avif`, `.bmp`, `.pdf` | Native Rust `image` encoder, in-memory PDF 1.4, FFmpeg |
+| **Audio** | `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, `.opus`, `.aiff`, `.wma` | `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, `.opus`, `.aiff`, `.wma` | High-fidelity portable FFmpeg audio pipeline |
+| **Video** | `.mp4`, `.mov`, `.mkv`, `.webm`, `.avi`, `.wmv`, `.gif` | `.mp4`, `.gif`, `.mp3` (audio rip), `.mov`, `.mkv`, `.webm`, `.avi`, `.wmv` | Bundled FFmpeg video transcoding & palette-optimized GIF encoder |
+| **PDF** | `.pdf` | `.docx`, `.pptx`, `.xlsx`, `.png` (300 DPI), `.jpg`, `.txt`, `.md` | Multi-engine document parser & rasterizer |
+| **Documents** | `.docx`, `.doc`, `.md`, `.markdown`, `.txt`, `.rtf`, `.epub`, `.pages` | `.pdf`, `.docx`, `.txt`, `.md`, `.html`, `.epub` | Hidden COM automation (Word) / macOS `textutil` / LibreOffice |
+| **Slides** | `.pptx`, `.ppt` | `.pdf`, `.jpg`, `.png`, `.pptx` | Hidden PowerPoint COM automation / LibreOffice headless |
+| **Spreadsheets** | `.xlsx`, `.xls`, `.csv`, `.tsv`, `.ods` | `.xlsx`, `.csv`, `.tsv`, `.pdf`, `.ods` | Native Rust delimiter parser & Excel COM automation |
+| **Subtitles** | `.srt`, `.vtt` | `.vtt`, `.srt`, `.txt` (clean transcript) | Zero-dependency native Rust timestamp & cue parser |
+| **Archives** | `.zip`, `.tar`, `.gz`, `.tgz`, `.rar` | `.zip`, `.tar`, `.tar.gz` | Native OS compression pipeline (`tar.exe` / macOS `tar`) |
 
 ---
 
