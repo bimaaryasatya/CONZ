@@ -1,0 +1,72 @@
+name: Build macOS & Publish to CONZ-HY
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-macos:
+    name: Build macOS Universal DMG
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Setup Rust & Targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Install Node Dependencies
+        run: npm ci || npm install
+
+      - name: Build macOS Universal Bundle
+        run: npx tauri build --target universal-apple-darwin
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ""
+
+      - name: Locate DMG File
+        id: find_dmg
+        run: |
+          DMG=$(find src-tauri/target/universal-apple-darwin/release/bundle/dmg -name "*.dmg" | head -n 1)
+          if [ -z "$DMG" ]; then
+            DMG=$(find src-tauri/target -name "*.dmg" | head -n 1)
+          fi
+          echo "dmg_path=$DMG" >> $GITHUB_OUTPUT
+          echo "Found DMG: $DMG"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CONZ-macOS-Universal-DMG
+          path: ${{ steps.find_dmg.outputs.dmg_path }}
+
+      - name: Push DMG to CONZ-HY Public Repository
+        env:
+          AUTH_TOKEN: ${{ secrets.CONZ_HY_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          DMG="${{ steps.find_dmg.outputs.dmg_path }}"
+          if [ -f "$DMG" ]; then
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "github-actions[bot]@users.noreply.github.com"
+            git clone "https://x-access-token:${AUTH_TOKEN}@github.com/bimaaryasatya/CONZ-HY.git" dist-repo
+            cp "$DMG" dist-repo/CONZ-Installer-macOS.dmg
+            cd dist-repo
+            git add CONZ-Installer-macOS.dmg
+            git commit -m "feat(macos): publish macOS Universal DMG installer" || echo "No changes to commit"
+            git push origin main
+          else
+            echo "No DMG file found to push"
+            exit 1
+          fi
