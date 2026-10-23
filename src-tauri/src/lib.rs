@@ -363,6 +363,30 @@ fn find_ffmpeg() -> Option<PathBuf> {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mac_paths = [
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/usr/bin/ffmpeg",
+        ];
+        for p in mac_paths {
+            let pb = PathBuf::from(p);
+            if pb.exists() {
+                return Some(pb);
+            }
+        }
+        if let Ok(out) = Command::new("which").arg("ffmpeg").output() {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout);
+                if let Some(first_line) = s.lines().next() {
+                    let p = PathBuf::from(first_line.trim());
+                    if p.exists() { return Some(p); }
+                }
+            }
+        }
+    }
+
     None
 }
 
@@ -476,6 +500,50 @@ fn convert_archive(input_path: &Path, output_path: &Path, target_ext: &str) -> R
             }
             _ => {
                 comp_cmd.args(["-a", "-cf", output_path.to_string_lossy().as_ref(), "-C", temp_dir.to_string_lossy().as_ref(), "."]);
+            }
+        }
+        let comp_res = comp_cmd.output().map_err(|e| format!("Gagal mengompresi arsip: {}", e))?;
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        if !comp_res.status.success() {
+            return Err("Gagal membuat arsip target".to_string());
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // 1. Extract input archive via native tar / unzip
+        let mut extract_cmd = Command::new("tar");
+        extract_cmd.args(["-xf", input_path.to_string_lossy().as_ref(), "-C", temp_dir.to_string_lossy().as_ref()]);
+        let extract_res = extract_cmd.output();
+        if extract_res.is_err() || !extract_res.as_ref().unwrap().status.success() {
+            let mut unzip_cmd = Command::new("unzip");
+            unzip_cmd.args(["-q", input_path.to_string_lossy().as_ref(), "-d", temp_dir.to_string_lossy().as_ref()]);
+            let _ = unzip_cmd.output();
+        }
+
+        // 2. Compress to target archive
+        let mut comp_cmd = Command::new("tar");
+        match target_ext {
+            "tar" => {
+                comp_cmd.args(["-cf", output_path.to_string_lossy().as_ref(), "-C", temp_dir.to_string_lossy().as_ref(), "."]);
+            }
+            "gz" | "gzip" | "tgz" => {
+                comp_cmd.args(["-czf", output_path.to_string_lossy().as_ref(), "-C", temp_dir.to_string_lossy().as_ref(), "."]);
+            }
+            "zip" => {
+                let mut zip_cmd = Command::new("zip");
+                zip_cmd.current_dir(&temp_dir);
+                zip_cmd.args(["-r", output_path.to_string_lossy().as_ref(), "."]);
+                let zip_res = zip_cmd.output().map_err(|e| format!("Gagal mengompresi zip: {}", e))?;
+                let _ = fs::remove_dir_all(&temp_dir);
+                if !zip_res.status.success() {
+                    return Err("Gagal membuat arsip zip".to_string());
+                }
+                return Ok(());
+            }
+            _ => {
+                comp_cmd.args(["-cf", output_path.to_string_lossy().as_ref(), "-C", temp_dir.to_string_lossy().as_ref(), "."]);
             }
         }
         let comp_res = comp_cmd.output().map_err(|e| format!("Gagal mengompresi arsip: {}", e))?;
@@ -624,6 +692,7 @@ fn convert_pdf_to_images(
 
     #[cfg(target_os = "macos")]
     {
+        let _ = (parent_dir, stem);
         let fmt = if target_ext == "jpg" || target_ext == "jpeg" { "jpeg" } else { "png" };
         let mut cmd = Command::new("sips");
         cmd.args(["-s", "format", fmt, input_path.to_string_lossy().as_ref(), "--out", _output_path.to_string_lossy().as_ref()]);
@@ -764,6 +833,7 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
         // Fallback to FFmpeg for HEIC / AVIF / TIFF / SVG -> PDF
         if let Some(ffmpeg) = find_ffmpeg() {
             let mut cmd = Command::new(ffmpeg);
+            #[cfg(target_os = "windows")]
             cmd.creation_flags(CREATE_NO_WINDOW);
             cmd.args(["-y", "-i", input_path, output_path_str.as_str()]);
             if let Ok(res) = cmd.output() {
@@ -815,6 +885,7 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
     if (is_audio || is_video || is_img) && (target_is_audio || target_is_video || target_is_img) {
         if let Some(ffmpeg) = find_ffmpeg() {
             let mut cmd = Command::new(ffmpeg);
+            #[cfg(target_os = "windows")]
             cmd.creation_flags(CREATE_NO_WINDOW);
             cmd.arg("-y");
             cmd.arg("-i");
