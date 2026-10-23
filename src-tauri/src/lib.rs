@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tauri::{
     menu::{Menu, MenuItem},
@@ -193,6 +193,197 @@ fn image_to_pdf(input_path: &Path, output_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+// Helper to locate FFmpeg binary
+fn find_ffmpeg() -> Option<PathBuf> {
+    // 1. Check beside current executable or in bin/
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(parent) = exe_path.parent() {
+            let p1 = parent.join("ffmpeg.exe");
+            if p1.exists() { return Some(p1); }
+            let p2 = parent.join("bin").join("ffmpeg.exe");
+            if p2.exists() { return Some(p2); }
+            let p3 = parent.join("../bin/ffmpeg.exe");
+            if p3.exists() { return Some(p3); }
+        }
+    }
+
+    // 2. Check local workspace bin folder
+    let local_bin = PathBuf::from(r"src-tauri\bin\ffmpeg.exe");
+    if local_bin.exists() {
+        return Some(local_bin);
+    }
+
+    // 3. Check WinGet package location
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        let winget_path = PathBuf::from(&local_app_data).join("Microsoft").join("WinGet").join("Packages");
+        if winget_path.exists() {
+            if let Ok(entries) = fs::read_dir(&winget_path) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.contains("FFmpeg") {
+                        let potential_paths = [
+                            entry.path().join("ffmpeg.exe"),
+                            entry.path().join("bin").join("ffmpeg.exe"),
+                        ];
+                        for p in &potential_paths {
+                            if p.exists() { return Some(p.clone()); }
+                        }
+                        if let Ok(sub_entries) = fs::read_dir(entry.path()) {
+                            for sub in sub_entries.flatten() {
+                                let sub_p = sub.path().join("bin").join("ffmpeg.exe");
+                                if sub_p.exists() { return Some(sub_p); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Check system PATH
+    #[cfg(target_os = "windows")]
+    {
+        let path_output = Command::new("where.exe")
+            .arg("ffmpeg")
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        if let Ok(out) = path_output {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout);
+                if let Some(first_line) = s.lines().next() {
+                    let p = PathBuf::from(first_line.trim());
+                    if p.exists() { return Some(p); }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+// Subtitle conversion logic (Pure Rust)
+fn convert_subtitles(input_path: &Path, output_path: &Path, src_ext: &str, target_ext: &str) -> Result<(), String> {
+    let content = fs::read_to_string(input_path).map_err(|e| format!("Gagal membaca subtitle: {}", e))?;
+    let result = match (src_ext, target_ext) {
+        ("srt", "vtt") => {
+            let mut out = String::from("WEBVTT\n\n");
+            for line in content.lines() {
+                if line.contains("-->") {
+                    out.push_str(&line.replace(',', "."));
+                } else {
+                    out.push_str(line);
+                }
+                out.push('\n');
+            }
+            out
+        }
+        ("vtt", "srt") => {
+            let mut out = String::new();
+            let mut started = false;
+            for line in content.lines() {
+                if !started {
+                    if line.contains("-->") {
+                        started = true;
+                    } else {
+                        continue;
+                    }
+                }
+                if line.contains("-->") {
+                    out.push_str(&line.replace('.', ","));
+                } else {
+                    out.push_str(line);
+                }
+                out.push('\n');
+            }
+            out
+        }
+        (_, "txt") => {
+            let mut out = String::new();
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.contains("-->") || trimmed.parse::<u32>().is_ok() || trimmed.starts_with("WEBVTT") {
+                    continue;
+                }
+                out.push_str(trimmed);
+                out.push('\n');
+            }
+            out
+        }
+        _ => content,
+    };
+    fs::write(output_path, result).map_err(|e| format!("Gagal menyimpan subtitle: {}", e))?;
+    Ok(())
+}
+
+// Delimited data conversion (CSV <-> TSV)
+fn convert_delimited(input_path: &Path, output_path: &Path, from_delim: char, to_delim: char) -> Result<(), String> {
+    let content = fs::read_to_string(input_path).map_err(|e| format!("Gagal membaca data: {}", e))?;
+    let mut out = String::with_capacity(content.len());
+    let mut in_quotes = false;
+
+    for c in content.chars() {
+        if c == '"' {
+            in_quotes = !in_quotes;
+            out.push(c);
+        } else if c == from_delim && !in_quotes {
+            out.push(to_delim);
+        } else {
+            out.push(c);
+        }
+    }
+    fs::write(output_path, out).map_err(|e| format!("Gagal menulis data: {}", e))?;
+    Ok(())
+}
+
+// Archive conversion via tar.exe
+fn convert_archive(input_path: &Path, output_path: &Path, target_ext: &str) -> Result<(), String> {
+    let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+    let temp_dir = std::env::temp_dir().join(format!("conz_arch_{}", millis));
+    let _ = fs::create_dir_all(&temp_dir);
+
+    #[cfg(target_os = "windows")]
+    {
+        // 1. Extract input archive
+        let mut extract_cmd = Command::new("tar.exe");
+        extract_cmd.creation_flags(CREATE_NO_WINDOW);
+        extract_cmd.args(["-xf", input_path.to_string_lossy().as_ref(), "-C", temp_dir.to_string_lossy().as_ref()]);
+        let extract_res = extract_cmd.output();
+        if extract_res.is_err() || !extract_res.as_ref().unwrap().status.success() {
+            let ps_script = format!("Expand-Archive -LiteralPath '{in_p}' -DestinationPath '{out_p}' -Force",
+                in_p = input_path.to_string_lossy().replace("'", "''"),
+                out_p = temp_dir.to_string_lossy().replace("'", "''")
+            );
+            let mut ps_cmd = Command::new("powershell");
+            ps_cmd.creation_flags(CREATE_NO_WINDOW);
+            ps_cmd.args(["-NoProfile", "-Command", &ps_script]);
+            let _ = ps_cmd.output();
+        }
+
+        // 2. Compress to target archive
+        let mut comp_cmd = Command::new("tar.exe");
+        comp_cmd.creation_flags(CREATE_NO_WINDOW);
+        match target_ext {
+            "tar" => {
+                comp_cmd.args(["-cf", output_path.to_string_lossy().as_ref(), "-C", temp_dir.to_string_lossy().as_ref(), "."]);
+            }
+            "gz" | "gzip" | "tgz" => {
+                comp_cmd.args(["-czf", output_path.to_string_lossy().as_ref(), "-C", temp_dir.to_string_lossy().as_ref(), "."]);
+            }
+            _ => {
+                comp_cmd.args(["-a", "-cf", output_path.to_string_lossy().as_ref(), "-C", temp_dir.to_string_lossy().as_ref(), "."]);
+            }
+        }
+        let comp_res = comp_cmd.output().map_err(|e| format!("Gagal mengompresi arsip: {}", e))?;
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        if !comp_res.status.success() {
+            return Err("Gagal membuat arsip target".to_string());
+        }
+    }
+
+    Ok(())
+}
+
 fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResult, String> {
     let p = Path::new(input_path);
     if !p.exists() {
@@ -213,28 +404,18 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
     let output_path = parent_dir.join(&output_filename);
     let output_path_str = output_path.to_string_lossy().to_string();
 
-    let image_extensions = ["png", "jpg", "jpeg", "webp", "bmp", "ico"];
+    let audio_extensions = ["mp3", "wav", "m4a", "flac", "ogg", "opus", "aiff", "aif", "wma"];
+    let video_extensions = ["mp4", "mov", "mkv", "webm", "avi", "wmv", "gif"];
+    let native_images = ["png", "jpg", "jpeg", "webp", "bmp", "ico"];
+    let extended_images = ["heic", "tiff", "tif", "avif", "svg"];
+    let subtitle_extensions = ["srt", "vtt"];
+    let archive_extensions = ["zip", "tar", "gz", "gzip", "tgz", "rar", "7z"];
 
-    // 1. Image -> PDF
-    if image_extensions.contains(&src_ext.as_str()) && target_ext == "pdf" {
-        image_to_pdf(p, &output_path)?;
-        let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-        return Ok(ConvertResult {
-            success: true,
-            input_path: input_path.to_string(),
-            output_path: output_path_str,
-            output_filename,
-            message: "Berhasil dikonversi ke PDF".to_string(),
-            size_bytes: size,
-        });
-    }
-
-    // 2. Image -> Image
-    if image_extensions.contains(&src_ext.as_str()) && image_extensions.contains(&target_ext.as_str()) {
-        let img = image::open(p).map_err(|e| format!("Gagal membaca gambar: {}", e))?;
-        img.save(&output_path)
-            .map_err(|e| format!("Gagal menyimpan gambar sebagai {}: {}", target_ext, e))?;
-
+    // ==========================================
+    // 1. SUBTITLES (SRT <-> VTT <-> TXT)
+    // ==========================================
+    if subtitle_extensions.contains(&src_ext.as_str()) && (subtitle_extensions.contains(&target_ext.as_str()) || target_ext == "txt") {
+        convert_subtitles(p, &output_path, &src_ext, &target_ext)?;
         let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
         return Ok(ConvertResult {
             success: true,
@@ -246,10 +427,171 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
         });
     }
 
-    // 3. Word Document -> PDF (Completely silent execution)
-    if (src_ext == "docx" || src_ext == "doc") && target_ext == "pdf" {
-        #[cfg(target_os = "windows")]
-        {
+    // ==========================================
+    // 2. DELIMITED SPREADSHEETS (CSV <-> TSV)
+    // ==========================================
+    if src_ext == "csv" && target_ext == "tsv" {
+        convert_delimited(p, &output_path, ',', '\t')?;
+        let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+        return Ok(ConvertResult {
+            success: true,
+            input_path: input_path.to_string(),
+            output_path: output_path_str,
+            output_filename,
+            message: "Berhasil dikonversi ke TSV".to_string(),
+            size_bytes: size,
+        });
+    }
+    if src_ext == "tsv" && target_ext == "csv" {
+        convert_delimited(p, &output_path, '\t', ',')?;
+        let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+        return Ok(ConvertResult {
+            success: true,
+            input_path: input_path.to_string(),
+            output_path: output_path_str,
+            output_filename,
+            message: "Berhasil dikonversi ke CSV".to_string(),
+            size_bytes: size,
+        });
+    }
+
+    // ==========================================
+    // 3. ARCHIVES (ZIP, TAR, GZ, RAR)
+    // ==========================================
+    if archive_extensions.contains(&src_ext.as_str()) && ["zip", "tar", "gz"].contains(&target_ext.as_str()) {
+        convert_archive(p, &output_path, &target_ext)?;
+        let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+        return Ok(ConvertResult {
+            success: true,
+            input_path: input_path.to_string(),
+            output_path: output_path_str,
+            output_filename,
+            message: format!("Berhasil dikonversi ke arsip {}", target_ext.to_uppercase()),
+            size_bytes: size,
+        });
+    }
+
+    // ==========================================
+    // 4. IMAGE -> PDF (Pure Rust native)
+    // ==========================================
+    if (native_images.contains(&src_ext.as_str()) || extended_images.contains(&src_ext.as_str())) && target_ext == "pdf" {
+        if native_images.contains(&src_ext.as_str()) {
+            if image_to_pdf(p, &output_path).is_ok() {
+                let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                return Ok(ConvertResult {
+                    success: true,
+                    input_path: input_path.to_string(),
+                    output_path: output_path_str,
+                    output_filename,
+                    message: "Berhasil dikonversi ke PDF".to_string(),
+                    size_bytes: size,
+                });
+            }
+        }
+        // Fallback to FFmpeg for HEIC / AVIF / TIFF / SVG -> PDF
+        if let Some(ffmpeg) = find_ffmpeg() {
+            let mut cmd = Command::new(ffmpeg);
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            cmd.args(["-y", "-i", input_path, output_path_str.as_str()]);
+            if let Ok(res) = cmd.output() {
+                if res.status.success() {
+                    let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                    return Ok(ConvertResult {
+                        success: true,
+                        input_path: input_path.to_string(),
+                        output_path: output_path_str,
+                        output_filename,
+                        message: "Berhasil dikonversi ke PDF".to_string(),
+                        size_bytes: size,
+                    });
+                }
+            }
+        }
+    }
+
+    // ==========================================
+    // 5. NATIVE IMAGE -> NATIVE IMAGE
+    // ==========================================
+    if native_images.contains(&src_ext.as_str()) && native_images.contains(&target_ext.as_str()) {
+        if let Ok(img) = image::open(p) {
+            if img.save(&output_path).is_ok() {
+                let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                return Ok(ConvertResult {
+                    success: true,
+                    input_path: input_path.to_string(),
+                    output_path: output_path_str,
+                    output_filename,
+                    message: format!("Berhasil dikonversi ke {}", target_ext.to_uppercase()),
+                    size_bytes: size,
+                });
+            }
+        }
+    }
+
+    // ==========================================
+    // 6. AUDIO & VIDEO & EXTENDED IMAGES (via FFmpeg)
+    // ==========================================
+    let is_audio = audio_extensions.contains(&src_ext.as_str());
+    let is_video = video_extensions.contains(&src_ext.as_str());
+    let is_img = native_images.contains(&src_ext.as_str()) || extended_images.contains(&src_ext.as_str());
+
+    let target_is_audio = audio_extensions.contains(&target_ext.as_str());
+    let target_is_video = video_extensions.contains(&target_ext.as_str());
+    let target_is_img = native_images.contains(&target_ext.as_str()) || extended_images.contains(&target_ext.as_str());
+
+    if (is_audio || is_video || is_img) && (target_is_audio || target_is_video || target_is_img) {
+        if let Some(ffmpeg) = find_ffmpeg() {
+            let mut cmd = Command::new(ffmpeg);
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            cmd.arg("-y");
+            cmd.arg("-i");
+            cmd.arg(input_path);
+
+            // Audio extraction from video
+            if is_video && target_ext == "mp3" {
+                cmd.args(["-vn", "-c:a", "libmp3lame", "-q:a", "2"]);
+            } else if is_video && target_ext == "gif" {
+                cmd.args(["-vf", "fps=12,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse"]);
+            } else if src_ext == "gif" && target_ext == "mp4" {
+                cmd.args(["-movflags", "faststart", "-pix_fmt", "yuv420p"]);
+            }
+
+            cmd.arg(&output_path_str);
+
+            let res = cmd.output().map_err(|e| format!("Gagal memanggil FFmpeg: {}", e))?;
+            if res.status.success() {
+                let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                return Ok(ConvertResult {
+                    success: true,
+                    input_path: input_path.to_string(),
+                    output_path: output_path_str,
+                    output_filename,
+                    message: format!("Berhasil dikonversi ke {}", target_ext.to_uppercase()),
+                    size_bytes: size,
+                });
+            } else {
+                let err_txt = String::from_utf8_lossy(&res.stderr);
+                let snippet = err_txt.lines().rev().take(3).collect::<Vec<_>>().join(" ");
+                return Err(format!("FFmpeg error: {}", snippet));
+            }
+        } else {
+            return Err("FFmpeg tidak ditemukan. Pastikan FFmpeg terpasang untuk konversi media.".to_string());
+        }
+    }
+
+    // ==========================================
+    // 7. MICROSOFT OFFICE COM (WORD, EXCEL, PPT)
+    // ==========================================
+    #[cfg(target_os = "windows")]
+    {
+        // Word -> PDF / TXT / HTML / DOCX
+        if (src_ext == "docx" || src_ext == "doc" || src_ext == "rtf") && ["pdf", "txt", "html", "docx"].contains(&target_ext.as_str()) {
+            let format_code = match target_ext.as_str() {
+                "pdf" => 17, // wdFormatPDF
+                "txt" => 2,  // wdFormatText
+                "html" => 8, // wdFormatHTML
+                _ => 16,     // wdFormatXMLDocument (DOCX)
+            };
             let script = format!(
                 r#"
                 $ErrorActionPreference = 'Stop'
@@ -257,7 +599,7 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
                     $word = New-Object -ComObject Word.Application
                     $word.Visible = $false
                     $doc = $word.Documents.Open('{input}')
-                    $doc.SaveAs([ref]'{output}', [ref]17)
+                    $doc.SaveAs([ref]'{output}', [ref]{code})
                     $doc.Close([ref]0)
                     $word.Quit()
                     exit 0
@@ -267,17 +609,13 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
                 }}
                 "#,
                 input = p.to_string_lossy().replace("'", "''"),
-                output = output_path.to_string_lossy().replace("'", "''")
+                output = output_path.to_string_lossy().replace("'", "''"),
+                code = format_code
             );
-
-            // Execute completely silently in the background (CREATE_NO_WINDOW)
             let mut cmd = Command::new("powershell");
             cmd.creation_flags(CREATE_NO_WINDOW);
             cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
-
-            let output = cmd.output();
-
-            if let Ok(res) = output {
+            if let Ok(res) = cmd.output() {
                 if res.status.success() {
                     let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
                     return Ok(ConvertResult {
@@ -285,56 +623,167 @@ fn do_convert_file(input_path: &str, target_format: &str) -> Result<ConvertResul
                         input_path: input_path.to_string(),
                         output_path: output_path_str,
                         output_filename,
-                        message: "Berhasil dikonversi ke PDF via Microsoft Word".to_string(),
+                        message: format!("Berhasil dikonversi ke {}", target_ext.to_uppercase()),
                         size_bytes: size,
                     });
                 }
+            }
+        }
 
-                // Fallback to LibreOffice if installed
-                let soffice_paths = [
-                    r"C:\Program Files\LibreOffice\program\soffice.exe",
-                    r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
-                ];
-                for soffice in soffice_paths {
-                    if Path::new(soffice).exists() {
-                        let mut lo_cmd = Command::new(soffice);
-                        lo_cmd.creation_flags(CREATE_NO_WINDOW);
-                        lo_cmd.args([
-                            "--headless",
-                            "--convert-to",
-                            "pdf",
-                            "--outdir",
-                            parent_dir.to_string_lossy().as_ref(),
-                            p.to_string_lossy().as_ref(),
-                        ]);
-
-                        if let Ok(lo_res) = lo_cmd.output() {
-                            if lo_res.status.success() {
-                                let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-                                return Ok(ConvertResult {
-                                    success: true,
-                                    input_path: input_path.to_string(),
-                                    output_path: output_path_str,
-                                    output_filename,
-                                    message: "Berhasil dikonversi via LibreOffice ke PDF".to_string(),
-                                    size_bytes: size,
-                                });
-                            }
-                        }
-                    }
+        // PowerPoint -> PDF / JPG / PNG
+        if (src_ext == "pptx" || src_ext == "ppt") && ["pdf", "jpg", "png"].contains(&target_ext.as_str()) {
+            let format_code = match target_ext.as_str() {
+                "pdf" => 32, // ppSaveAsPDF
+                "jpg" => 17, // ppSaveAsJPG
+                _ => 18,     // ppSaveAsPNG
+            };
+            let script = format!(
+                r#"
+                $ErrorActionPreference = 'Stop'
+                try {{
+                    $ppt = New-Object -ComObject PowerPoint.Application
+                    $pres = $ppt.Presentations.Open('{input}', [Microsoft.Office.Core.MsoTriState]::msoTrue, [Microsoft.Office.Core.MsoTriState]::msoFalse, [Microsoft.Office.Core.MsoTriState]::msoFalse)
+                    $pres.SaveAs('{output}', {code})
+                    $pres.Close()
+                    $ppt.Quit()
+                    exit 0
+                }} catch {{
+                    Write-Error $_.Exception.Message
+                    exit 1
+                }}
+                "#,
+                input = p.to_string_lossy().replace("'", "''"),
+                output = output_path.to_string_lossy().replace("'", "''"),
+                code = format_code
+            );
+            let mut cmd = Command::new("powershell");
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
+            if let Ok(res) = cmd.output() {
+                if res.status.success() {
+                    let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                    return Ok(ConvertResult {
+                        success: true,
+                        input_path: input_path.to_string(),
+                        output_path: output_path_str,
+                        output_filename,
+                        message: format!("Berhasil dikonversi ke {}", target_ext.to_uppercase()),
+                        size_bytes: size,
+                    });
                 }
+            }
+        }
 
-                return Err("Gagal mengonversi dokumen Word. Pastikan Microsoft Word terpasang.".to_string());
+        // Excel -> PDF / CSV / ODS / XLSX
+        if (src_ext == "xlsx" || src_ext == "xls" || src_ext == "ods") && ["pdf", "csv", "xlsx"].contains(&target_ext.as_str()) {
+            let script = if target_ext == "pdf" {
+                format!(
+                    r#"
+                    $ErrorActionPreference = 'Stop'
+                    try {{
+                        $excel = New-Object -ComObject Excel.Application
+                        $excel.Visible = $false
+                        $wb = $excel.Workbooks.Open('{input}')
+                        $wb.ExportAsFixedFormat(0, '{output}')
+                        $wb.Close($false)
+                        $excel.Quit()
+                        exit 0
+                    }} catch {{
+                        Write-Error $_.Exception.Message
+                        exit 1
+                    }}
+                    "#,
+                    input = p.to_string_lossy().replace("'", "''"),
+                    output = output_path.to_string_lossy().replace("'", "''")
+                )
+            } else {
+                let code = if target_ext == "csv" { 6 } else { 51 };
+                format!(
+                    r#"
+                    $ErrorActionPreference = 'Stop'
+                    try {{
+                        $excel = New-Object -ComObject Excel.Application
+                        $excel.Visible = $false
+                        $wb = $excel.Workbooks.Open('{input}')
+                        $wb.SaveAs('{output}', {code})
+                        $wb.Close($false)
+                        $excel.Quit()
+                        exit 0
+                    }} catch {{
+                        Write-Error $_.Exception.Message
+                        exit 1
+                    }}
+                    "#,
+                    input = p.to_string_lossy().replace("'", "''"),
+                    output = output_path.to_string_lossy().replace("'", "''"),
+                    code = code
+                )
+            };
+            let mut cmd = Command::new("powershell");
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
+            if let Ok(res) = cmd.output() {
+                if res.status.success() {
+                    let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                    return Ok(ConvertResult {
+                        success: true,
+                        input_path: input_path.to_string(),
+                        output_path: output_path_str,
+                        output_filename,
+                        message: format!("Berhasil dikonversi ke {}", target_ext.to_uppercase()),
+                        size_bytes: size,
+                    });
+                }
+            }
+        }
+
+        // PDF -> DOCX / TXT via Word
+        if src_ext == "pdf" && ["docx", "txt"].contains(&target_ext.as_str()) {
+            let code = if target_ext == "docx" { 16 } else { 2 };
+            let script = format!(
+                r#"
+                $ErrorActionPreference = 'Stop'
+                try {{
+                    $word = New-Object -ComObject Word.Application
+                    $word.Visible = $false
+                    $doc = $word.Documents.Open('{input}', [ref]$false, [ref]$true)
+                    $doc.SaveAs([ref]'{output}', [ref]{code})
+                    $doc.Close([ref]0)
+                    $word.Quit()
+                    exit 0
+                }} catch {{
+                    Write-Error $_.Exception.Message
+                    exit 1
+                }}
+                "#,
+                input = p.to_string_lossy().replace("'", "''"),
+                output = output_path.to_string_lossy().replace("'", "''"),
+                code = code
+            );
+            let mut cmd = Command::new("powershell");
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
+            if let Ok(res) = cmd.output() {
+                if res.status.success() {
+                    let size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                    return Ok(ConvertResult {
+                        success: true,
+                        input_path: input_path.to_string(),
+                        output_path: output_path_str,
+                        output_filename,
+                        message: format!("Berhasil dikonversi ke {}", target_ext.to_uppercase()),
+                        size_bytes: size,
+                    });
+                }
             }
         }
     }
 
     Err(format!(
-        "Format konversi dari .{} ke .{} belum didukung.",
+        "Format konversi dari .{} ke .{} belum didukung atau aplikasi pendukung belum terpasang.",
         src_ext, target_ext
     ))
 }
-
 #[tauri::command]
 async fn convert_file(
     app: tauri::AppHandle,

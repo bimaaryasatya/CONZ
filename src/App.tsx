@@ -31,10 +31,10 @@ function App() {
 
     const setupListeners = async () => {
       if (!isTauri()) {
-        // In browser mock mode, show a default test file
+        // In browser mock mode, show default test file (JPG showcasing WEBP conversion like Tangerine reference)
         setActiveFile({
-          name: "Laporan_Keuangan_2026.docx",
-          path: "C:\\Users\\LENOVO\\Documents\\Laporan_Keuangan_2026.docx",
+          name: "Foto_Liburan.jpg",
+          path: "C:\\Users\\LENOVO\\Pictures\\Foto_Liburan.jpg",
           isSimulated: true,
         });
         return;
@@ -142,17 +142,33 @@ function App() {
   }, []);
 
   const handleClose = async () => {
-    setActiveFile(null);
-    setStatusToast(null);
-    setDragActiveIndex(null);
-    await api.hideRadialWindow();
+    if (isTauri()) {
+      setActiveFile(null);
+      setStatusToast(null);
+      setDragActiveIndex(null);
+      await api.hideRadialWindow();
+    } else {
+      // In browser preview, show quick feedback and keep demo active
+      setStatusToast({
+        type: "success",
+        message: "Menu ditutup (Simulasi)",
+      });
+      setTimeout(() => setStatusToast(null), 2000);
+    }
   };
 
   const handleExecuteConvert = (filePath: string, targetFormat: string) => {
-    // 1. Instantly close radial menu so the user can immediately convert more files!
-    handleClose();
+    if (isTauri()) {
+      // Instantly close radial window in Tauri
+      handleClose();
+    } else {
+      setStatusToast({
+        type: "success",
+        message: `Memulai konversi ke ${targetFormat.toUpperCase()}...`,
+      });
+      setTimeout(() => setStatusToast(null), 2500);
+    }
 
-    // 2. Trigger asynchronous conversion in background without blocking
     api.convertFile(filePath, targetFormat).catch((err) => {
       console.error("Background conversion failed:", err);
     });
@@ -160,11 +176,18 @@ function App() {
 
   const fileInfo: FileTypeDefinition = activeFile
     ? getFileTypeInfo(activeFile.name)
-    : getFileTypeInfo("file.docx");
+    : getFileTypeInfo("file.png");
+
+  // Sample files for browser demonstration
+  const sampleFiles = [
+    { name: "Foto_Liburan.jpg", path: "C:\\Users\\LENOVO\\Pictures\\Foto_Liburan.jpg" },
+    { name: "Laporan_Keuangan.docx", path: "C:\\Users\\LENOVO\\Documents\\Laporan_Keuangan.docx" },
+    { name: "Dokumen_Penting.pdf", path: "C:\\Users\\LENOVO\\Documents\\Dokumen_Penting.pdf" },
+  ];
 
   return (
     <div className="popup-app-root">
-      {/* Radial Menu is displayed whenever activeFile is set or testing */}
+      {/* Radial Menu is displayed whenever activeFile is set */}
       {activeFile && (
         <RevolverMenu
           fileName={activeFile.name}
@@ -175,6 +198,22 @@ function App() {
           isSimulated={activeFile.isSimulated}
           externalActiveIndex={dragActiveIndex}
         />
+      )}
+
+      {/* Browser Demo Quick Switcher */}
+      {!isTauri() && (
+        <div className="demo-file-switcher">
+          <span className="demo-switcher-label">Demo Format:</span>
+          {sampleFiles.map((f) => (
+            <button
+              key={f.name}
+              className={`demo-file-btn ${activeFile?.name === f.name ? "is-current" : ""}`}
+              onClick={() => setActiveFile({ ...f, isSimulated: true })}
+            >
+              {f.name.split(".").pop()?.toUpperCase()}
+            </button>
+          ))}
+        </div>
       )}
 
       {/* Result Toast */}
