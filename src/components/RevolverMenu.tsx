@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { FormatChamber } from "../types";
 import { FileTypeDefinition } from "../formatRegistry";
+import { sound } from "../sound";
 
 interface RevolverMenuProps {
   fileName: string;
@@ -123,6 +124,15 @@ export const RevolverMenu: React.FC<RevolverMenuProps> = ({
       ? externalActiveIndex
       : (internalHoveredIndex !== null ? internalHoveredIndex : initialIndex);
 
+  // Play subtle rotary tick sound on sector change
+  const prevActiveRef = useRef<number | null>(activeIndex);
+  useEffect(() => {
+    if (activeIndex !== null && prevActiveRef.current !== null && activeIndex !== prevActiveRef.current) {
+      sound.playTick();
+    }
+    prevActiveRef.current = activeIndex;
+  }, [activeIndex]);
+
   useEffect(() => {
     requestAnimationFrame(() => setMounted(true));
 
@@ -135,6 +145,7 @@ export const RevolverMenu: React.FC<RevolverMenuProps> = ({
       // Check number keys 1..9 for direct shortcut
       const keyNum = parseInt(e.key, 10);
       if (!isNaN(keyNum) && keyNum >= 1 && keyNum <= chambers.length) {
+        sound.playDrop();
         onSelectFormat(chambers[keyNum - 1].format);
       }
     };
@@ -266,7 +277,10 @@ export const RevolverMenu: React.FC<RevolverMenuProps> = ({
                 <g
                   key={chamber.format}
                   className={`tangerine-petal ${isActive ? "is-active" : ""}`}
-                  onClick={() => onSelectFormat(chamber.format)}
+                  onClick={() => {
+                    sound.playDrop();
+                    onSelectFormat(chamber.format);
+                  }}
                   onMouseEnter={() => setInternalHoveredIndex(index)}
                 >
                   <path

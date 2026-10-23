@@ -3,6 +3,7 @@ import { api, isTauri } from "./api";
 import { getFileTypeInfo, FileTypeDefinition } from "./formatRegistry";
 import { RevolverMenu } from "./components/RevolverMenu";
 import { CheckCircle2, AlertCircle } from "lucide-react";
+import { sound } from "./sound";
 import "./App.css";
 
 interface ActiveFile {
@@ -158,6 +159,7 @@ function App() {
   };
 
   const handleExecuteConvert = (filePath: string, targetFormat: string) => {
+    sound.playDrop();
     if (isTauri()) {
       // Instantly close radial window in Tauri
       handleClose();
